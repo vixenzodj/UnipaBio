@@ -1,0 +1,16 @@
+{
+  "name": "Registratore · Lezioni UniPA",
+  "short_name": "Registratore",
+  "description": "Registra la lezione dal telefono: il file arriva da solo nella cartella della lezione.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    { "src": "../icona-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "../icona.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
