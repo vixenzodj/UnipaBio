@@ -209,6 +209,7 @@
     engine: null, // { kind, seg, obj }: il codificatore del segmento che riceve l'audio
     engineErrors: 0,
     writing: Promise.resolve(), // scritture sul telefono, in ordine
+    pausing: Promise.resolve(), // pausa del codificatore dopo un'interruzione: ripresa e chiusura la aspettano
     segments: [], // coda: il primo è quello che si sta inviando
     current: null, // segmento che riceve l'audio
     archive: [], // copie sul telefono delle registrazioni già nel cloud
@@ -279,7 +280,8 @@
 
   // ─── Rete ─────────────────────────────────────────────────────────────────
 
-  function NetError(message, timeout) { this.message = message; this.network = true; this.timeout = Boolean(timeout); }
+  /** Richiesta non riuscita. google = risposta sbagliata o non valida del cloud (non un problema della rete del telefono). */
+  function NetError(message, timeout, google) { this.message = message; this.network = true; this.timeout = Boolean(timeout); this.google = Boolean(google); }
 
   function api(body, timeoutMs) {
     var controller = window.AbortController ? new AbortController() : null;
@@ -294,12 +296,12 @@
     }).then(function (res) {
       return res.text().then(function (text) {
         var r;
-        try { r = JSON.parse(text); } catch (e) { throw new NetError('risposta non valida (HTTP ' + res.status + ')'); }
+        try { r = JSON.parse(text); } catch (e) { throw new NetError('risposta non valida (HTTP ' + res.status + ')', false, true); }
         // Solo la risposta a QUESTA richiesta: a volte Google serve una POST con la funzione delle GET, che
         // risponde "ok" senza aver fatto nulla (misurato nel cloud vero). In quel caso si ripete la richiesta.
         if (!r || typeof r !== 'object' || r.a !== body.a) {
           S.net.mismatch = (S.net.mismatch || 0) + 1;
-          throw new NetError('risposta del cloud non pertinente alla richiesta');
+          throw new NetError('risposta del cloud non pertinente alla richiesta', false, true);
         }
         return r;
       });
@@ -315,10 +317,15 @@
     return S.up.chunk;
   }
 
-  /** Tempo massimo di una richiesta con `bytes` byte di audio: 10 s più 2,5 volte il tempo previsto (da 15 s a 2 minuti). */
+  /**
+   * Tempo massimo di una richiesta con `bytes` byte di audio: 20 s più 3 volte il tempo previsto, da 60 s a 3 minuti.
+   * Generoso di proposito: l'audio è al sicuro sul telefono, aspettare non costa nulla, mentre interrompere una
+   * richiesta che stava per riuscire blocca tutto. Misurato il 9 ottobre 2026 in produzione: risposte di solito in
+   * 1-2 s, ma con picchi di 15 e 29 s.
+   */
   function timeoutFor(bytes) {
     var expected = (bytes / Math.max(S.up.rate, 1024)) * 1000;
-    return Math.max(15000, Math.min(120000, Math.round(10000 + 2.5 * expected)));
+    return Math.max(60000, Math.min(180000, Math.round(20000 + 3 * expected)));
   }
 
   /** "Android 10 · Chrome 154 · audio 48 kHz running · Opus 24 kHz 24 kbit/s": per capire a distanza su che telefono succede cosa. */
@@ -352,7 +359,7 @@
     if (reportsLeft <= 0) return;
     reportsLeft -= 1;
     try {
-      api({ a: 'report', token: S.token, kind: kind, where: where, message: String(message || '').slice(0, 300), device: deviceInfo() }, 20000).catch(function () {});
+      api({ a: 'report', token: S.token, kind: kind, where: where, message: String(message || '').slice(0, 300), device: deviceInfo() }, 60000).catch(function () {});
     } catch (e) { /* mai bloccare la pagina per una segnalazione */ }
   }
 
@@ -545,7 +552,7 @@
       // L'avvio del contesto audio non può mai bloccare la pagina: al massimo 1,5 s di attesa.
       var ctx = new Ctx({ latencyHint: 'playback' });
       return Promise.race([ctx.resume().catch(function () {}), sleep(1500)])
-        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261009o'), 15000, 'caricamento del modulo audio'); })
+        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261009p'), 15000, 'caricamento del modulo audio'); })
         .then(function () { return ctx; });
     }).then(function (ctx) {
       var source = ctx.createMediaStreamSource(stream);
@@ -643,6 +650,32 @@
     } else {
       S.engine = { kind: 'mr', seg: seg, obj: new MotoreAudio.MotoreMediaRecorder(S.audio.stream, c.mr, { onChunk: function (bytes) { onBlob(seg, bytes); } }) };
     }
+  }
+
+  /**
+   * Avvia il codificatore del segmento senza mai lasciare la registrazione senza codifica: se Opus non parte
+   * (raro: il browser lo dichiara disponibile ma lo rifiuta) e il segmento è ancora vuoto, passa al registratore
+   * del browser. → true se il codificatore è partito.
+   */
+  function startEngineSafe(seg) {
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        startEngine(seg);
+        return true;
+      } catch (err) {
+        report('errore', 'avvio del codificatore', ((err && (err.name || '') + ' ' + (err.message || '')) || 'errore') + ' · ' + S.engineChoice.label);
+        var mr = window.MotoreAudio && MotoreAudio.chooseRecorder();
+        if (attempt > 0 || S.engineChoice.kind !== 'opus' || !mr || seg.bytes > 0) return false;
+        S.engineChoice = { kind: 'mr', format: mr.format, mr: mr, rate: S.engineChoice.rate, label: 'registratore del browser ' + mr.mimeType };
+        seg.format = mr.format;
+      }
+    }
+    return false;
+  }
+
+  /** Quando la pausa del codificatore (interruzione) e le scritture sul telefono sono finite. */
+  function settled() {
+    return S.pausing.then(function () { return S.writing; });
   }
 
   /** Chiude il codificatore: 'finish' = fine del file; 'pause' = il file resta aperto (solo Opus). */
@@ -769,18 +802,20 @@
     }).then(function () {
       var seg = newStreamSegment(S.engineChoice.format);
       seg.localStart = Date.now();
+      S.engineErrors = 0;
+      if (!startEngineSafe(seg)) throw audioError('failed'); // nessun codificatore: niente registrazione a metà
       S.segments.push(seg);
       S.current = seg;
       S.recording = true;
       S.audioPaused = false;
-      S.engineErrors = 0;
-      startEngine(seg);
       saveSegments();
       keepStorage();
       startButtonBusy(false);
       startRecordingScreen();
       kick();
-    }, function (err) {
+    }).catch(function (err) {
+      // Microfono negato o assente, browser non adatto, codificatore che non parte: niente registrazione a metà.
+      S.engine = null;
       stopCapture();
       startButtonBusy(false);
       report('errore', 'avvio del microfono', (err && (err.code || err.name)) + (err && err.message && err.message !== err.code ? ': ' + err.message : ''));
@@ -862,9 +897,13 @@
     S.segments.push(seg);
     S.current = seg;
     S.engine = null;
-    if (S.audio && !S.audioPaused) startEngine(seg); // in pausa: il codificatore parte alla ripresa
+    if (S.audio && !S.audioPaused && !startEngineSafe(seg)) {
+      // Nessun codificatore disponibile: l'audio registrato finora è salvo; chi registra viene avvisato.
+      showError('Il codificatore audio del telefono si è fermato: tocca «termina» e avvia una nuova registrazione.');
+    }
     if (broken && oldEngine && oldEngine.obj.encoder) { try { oldEngine.obj.encoder.close(); } catch (e) { /* già chiuso */ } }
-    S.rotating = (broken ? S.writing : endEngine(oldEngine, 'finish')).then(function () { return sealSegment(old); }).then(function () {
+    // Prima la pausa in corso (interruzione) e la chiusura del vecchio codificatore, poi la fine del vecchio file.
+    S.rotating = S.pausing.then(function () { return broken ? S.writing : endEngine(oldEngine, 'finish'); }).then(function () { return sealSegment(old); }).then(function () {
       old.stopping = true;
       old.reason = reason;
       old.endedAt = Date.now();
@@ -934,7 +973,7 @@
       // anche la velocità stimata scende a un quarto. L'attesa finisce subito se torna la rete o se si termina.
       S.up.failures += 1;
       S.net.failures += 1;
-      S.up.probe = true;
+      if (!(err && err.google)) S.up.probe = true; // risposta sbagliata del cloud: la rete del telefono va bene
       if (err && err.timeout) S.up.rate = Math.max(1024, S.up.rate / 4);
       updateSaved();
       var wait = Math.min(10000, 1000 * Math.pow(2, Math.min(S.up.failures - 1, 4)));
@@ -1102,7 +1141,7 @@
     return Store.nextChunk(seg.local, seg.sent).then(function (next) {
       if (!next) return 'idle'; // scrittura ancora in corso
       report('errore', 'memoria del telefono', 'blocco mancante alla posizione ' + seg.sent + ' (il successivo inizia a ' + next.off + ')');
-      return api({ a: 'stop', token: S.token, rec: seg.rec, offset: seg.sent, data: '', end: seg.sent, seconds: seg.serverSeconds || 0, reason: 'manual' }, 60000)
+      return api({ a: 'stop', token: S.token, rec: seg.rec, offset: seg.sent, data: '', end: seg.sent, seconds: seg.serverSeconds || 0, reason: 'manual' }, 120000)
         .then(function (r) {
           if (!r.ok && r.error !== 'closed') return handleRefusal(seg, r);
           return reopenStream(seg, { saved: { format: seg.format, bytes: next.off } });
@@ -1125,7 +1164,7 @@
     }
     if (r.error === 'not_owner' || r.error === 'busy') return blocked(r);
     if (r.error !== 'retry') report('errore', 'risposta del cloud', r.error + ': ' + (r.message || ''));
-    throw new NetError(r.message || r.error);
+    throw new NetError(r.message || r.error, false, true);
   }
 
   /** Spegne il microfono e chiude sul telefono il file che riceveva l'audio (resta in coda per l'invio). */
@@ -1139,7 +1178,7 @@
     S.current = null;
     seg.stopping = true;
     seg.reason = reason;
-    return endEngine(e, 'finish').then(function () { return sealSegment(seg); }).then(saveSegments);
+    return S.pausing.then(function () { return endEngine(e, 'finish'); }).then(function () { return sealSegment(seg); }).then(saveSegments);
   }
 
   /**
@@ -1150,8 +1189,8 @@
   function reopenStream(old, reply) {
     var saved = reply && reply.saved;
     var savedBytes = saved && saved.format === old.format && typeof saved.bytes === 'number' ? saved.bytes : old.sent;
-    var before = old === S.current ? rotate(old, old.reason || 'manual') : sealSegment(old);
-    return Promise.resolve(before).then(function () { return S.writing; }).then(function () {
+    var before = old === S.current ? rotate(old, old.reason || 'manual') : settled().then(function () { return sealSegment(old); });
+    return Promise.resolve(before).then(settled).then(function () {
       if (savedBytes >= old.bytes) {
         // Il cloud ha già tutto l'audio di questo segmento.
         completeSegment(old, saved || {});
@@ -1210,20 +1249,17 @@
         chain = chain.then(function () { return writeChunk(cont, off, o.data, o.info); });
       });
       cont.seconds = cont.seconds || Math.max(0, (old.seconds || 0) - (rest[0] ? rest[0].sec || 0 : 0));
-      return chain.then(function () {
-        cont.finishedLocal = false;
-        return sealSegment(cont);
-      }).then(function () {
-        // sealSegment aggiunge la fine del flusso solo se manca.
-        return cont;
-      });
+      // Il file è già chiuso se l'ultima pagina copiata ha la fine del flusso (il registratore l'aveva scritta);
+      // altrimenti sealSegment la aggiunge. Mai due pagine di fine flusso.
+      cont.finishedLocal = old.format !== 'ogg' || Boolean(out[out.length - 1].info.flags & 4);
+      return chain.then(function () { return sealSegment(cont); }).then(function () { return cont; });
     });
   }
 
   function openSegment(seg) {
     var body = { a: 'start', token: S.token, client: deviceInfo(), lesson: seg.lessonHint || undefined, format: isStream(seg) ? seg.format : 'wav' };
     if (seg.localStart && !seg.lessonHint) body.at = seg.localStart + S.serverOffset; // lezione di quando si è iniziato a registrare
-    return api(body, 30000).then(function (r) {
+    return api(body, 90000).then(function (r) {
       if (!r.ok) return handleRefusal(seg, r);
       if (r.resumed) {
         var same = isStream(seg) ? r.rec.format === seg.format && r.rec.offset === seg.sent && seg.sent === 0 : r.rec.next === seg.sent;
@@ -1232,7 +1268,7 @@
           var stop = r.rec.format && r.rec.format !== 'wav'
             ? { a: 'stop', token: S.token, rec: r.rec.id, offset: r.rec.offset, data: '', end: r.rec.offset, reason: 'manual' }
             : { a: 'stop', token: S.token, rec: r.rec.id, seq: r.rec.next, reason: 'manual' };
-          return api(stop, 60000).then(function () { return null; });
+          return api(stop, 120000).then(function () { return null; });
         }
       }
       applyRec(seg, r.rec);
@@ -1339,7 +1375,7 @@
   }
 
   function finishLegacy(seg) {
-    return api({ a: 'stop', token: S.token, rec: seg.rec, seq: seg.next, reason: seg.reason, net: netSummary() }, 60000).then(function (r) {
+    return api({ a: 'stop', token: S.token, rec: seg.rec, seq: seg.next, reason: seg.reason, net: netSummary() }, 120000).then(function (r) {
       if (!r.ok && r.error === 'gap') { seg.sent = r.next; return null; }
       if (!r.ok && r.error === 'closed') r = { ok: true, summary: r.saved };
       if (!r.ok) return handleRefusal(seg, r);
@@ -1423,7 +1459,7 @@
     S.beating = true;
     S.lastBeatAt = now;
     var recorded = S.current ? S.current.live || S.current.seconds : seg.seconds || 0;
-    api({ a: 'beat', token: S.token, rec: seg.rec, pending: pendingBytes(), recorded: recorded }, 15000).then(function (r) {
+    api({ a: 'beat', token: S.token, rec: seg.rec, pending: pendingBytes(), recorded: recorded }, 60000).then(function (r) {
       if (r.ok) {
         S.net.beats += 1;
         if (r.server) S.serverOffset = r.server - Date.now();
@@ -1447,7 +1483,8 @@
       ' · ' + clock(seg ? seg.live || seg.seconds || 0 : 0) + ' registrati');
     var e = S.engine;
     S.engine = null;
-    endEngine(e, 'pause').then(saveSegments); // tutto l'audio ricevuto finisce sul telefono; il file resta aperto
+    // Tutto l'audio ricevuto finisce sul telefono; il file resta aperto. Ripresa e chiusura aspettano questa pausa.
+    S.pausing = endEngine(e, 'pause').then(saveSegments);
     stopCapture();
     S.recording = true; // la registrazione nel cloud resta aperta: si riprende nello stesso file
     S.audioPaused = true;
@@ -1472,7 +1509,8 @@
     var gap = S.interrupted ? (Date.now() - S.interrupted.at) / 1000 : 0;
     chooseEngine().then(function (choice) {
       if (!choice) throw audioError('unsupported');
-      return S.writing.then(function () { return openAudio(choice.rate); });
+      // Prima la pausa del codificatore (ultima pagina scritta), poi la ripresa dallo stesso punto del file.
+      return settled().then(function () { return openAudio(choice.rate); });
     }).then(function () {
       var seg = S.current;
       S.audioPaused = false;
@@ -1487,10 +1525,10 @@
           fresh.localStart = Date.now();
           S.segments.push(fresh);
           S.current = fresh;
-          startEngine(fresh);
+          if (!startEngineSafe(fresh)) showError('Il codificatore audio del telefono non parte: ricarica la pagina.');
         }
-      } else if (seg) {
-        startEngine(seg);
+      } else if (seg && !startEngineSafe(seg)) {
+        rotate(seg, 'manual'); // lo stesso file non riparte: si continua in un file nuovo
       }
       saveSegments();
       report('evento', 'ripresa', 'registrazione ripresa dopo ' + duration(gap));
@@ -1515,7 +1553,7 @@
     S.stopping = seg;
     $('end-here-btn').disabled = true;
     $('end-here-btn').textContent = 'Chiusura…';
-    S.writing.then(function () { return isStream(seg) ? sealSegment(seg) : null; }).then(function () {
+    settled().then(function () { return isStream(seg) ? sealSegment(seg) : null; }).then(function () {
       saveSegments();
       kick();
     });
@@ -1598,7 +1636,8 @@
     var items = [];
     S.segments.forEach(function (s) {
       if (s === S.current) return;
-      items.push({ local: s.local, title: (s.lesson && s.lesson.title) || 'Registrazione', when: s.startedAt || s.localStart, seconds: isStream(s) ? s.seconds || s.live : (s.next * pieceSamples()) / LEGACY_RATE, state: 'in attesa di invio', warn: true });
+      // Versione precedente: sul telefono restano solo i pezzi non ancora inviati (quelli scaricabili).
+      items.push({ local: s.local, title: (s.lesson && s.lesson.title) || 'Registrazione', when: s.startedAt || s.localStart, seconds: isStream(s) ? s.seconds || s.live : (Math.max(0, s.next - s.sent) * pieceSamples()) / LEGACY_RATE, state: 'in attesa di invio', warn: true });
     });
     S.archive.forEach(function (a) {
       items.push({ local: a.local, title: a.lesson || 'Registrazione', when: a.at, seconds: a.seconds, bytes: a.bytes, state: a.cloud === 'completa' ? 'nel cloud ✓' : 'nel cloud (in due file)' });
@@ -1752,7 +1791,7 @@
 
   function refreshStatus(first) {
     if (!S.token) { showLogin(); return Promise.resolve(null); }
-    return api({ a: 'status', token: S.token }, 20000).then(function (st) {
+    return api({ a: 'status', token: S.token }, 60000).then(function (st) {
       if (!first && S.screen === 'message') return st;
       S.status = st;
       if (st.server) S.serverOffset = st.server - Date.now();
@@ -1780,9 +1819,10 @@
   function decide(st) {
     if (S.screen === 'recording' || S.screen === 'done' || S.screen === 'interrupted') return;
     var active = st.active;
-    // Segmenti rimasti sul telefono che non sono la registrazione aperta: vanno solo chiusi e inviati.
+    // Segmenti rimasti sul telefono che non sono la registrazione aperta da riprendere: vanno solo chiusi e inviati
+    // (anche quella aperta, se il suo file sul telefono è già chiuso: "termina" premuto prima della ricarica).
     S.segments.forEach(function (s) {
-      if (active && active.mine && s.rec === active.id && isStream(s)) return;
+      if (active && active.mine && s.rec === active.id && isStream(s) && !s.finishedLocal) return;
       if (!s.stopping) { s.stopping = true; s.reason = s.reason || 'manual'; }
       if (isStream(s)) sealSegment(s);
     });
@@ -1807,7 +1847,7 @@
         var stop = active.format && active.format !== 'wav'
           ? { a: 'stop', token: S.token, rec: active.id, offset: active.offset, data: '', end: active.offset, reason: 'manual' }
           : { a: 'stop', token: S.token, rec: active.id, seq: active.next, reason: 'manual' };
-        api(stop, 60000).then(function () { refreshStatus(); }, function () {});
+        api(stop, 120000).then(function () { refreshStatus(); }, function () {});
         report('evento', 'registrazione aperta senza copia', 'chiusa nel cloud con l\'audio già ricevuto');
       }
       saveSegments();
@@ -1852,7 +1892,7 @@
     if (!code) { $('login-error').textContent = 'Inserisci il codice di accesso.'; $('login-code').focus(); return; }
     $('login-submit').disabled = true;
     $('login-error').textContent = '';
-    api({ a: 'login', name: name, code: code, device: deviceId }, 30000).then(function (r) {
+    api({ a: 'login', name: name, code: code, device: deviceId }, 60000).then(function (r) {
       if (!r.ok) { $('login-error').textContent = r.message || 'Accesso non riuscito.'; return null; }
       S.token = r.token;
       S.name = r.name;
@@ -1951,11 +1991,15 @@
     setInterval(poll, 5000);
   }
 
-  /** Dopo una chiusura improvvisa: dimensione, numero di pagina e posizione reali dall'ultimo blocco salvato. */
+  /**
+   * Dopo una chiusura improvvisa: dimensione, numero di pagina e posizione reali dall'ultimo blocco salvato;
+   * intestazione Ogg e numero di serie dalle prime pagine (le informazioni salvate a parte possono essere
+   * indietro di qualche secondo, le pagine no).
+   */
   function reconcile(seg) {
     if (!isStream(seg)) return Promise.resolve();
     return Store.lastChunk(seg.local).then(function (c) {
-      if (!c) { seg.bytes = seg.stored = 0; seg.sent = 0; return; }
+      if (!c) { seg.bytes = seg.stored = 0; seg.sent = 0; seg.headBytes = 0; return null; }
       seg.bytes = seg.stored = c.off + c.len;
       if (seg.sent > seg.bytes) seg.sent = seg.bytes;
       if (seg.format === 'ogg') {
@@ -1965,6 +2009,15 @@
       }
       if (c.sec) seg.seconds = Math.max(seg.seconds || 0, c.sec);
       seg.live = Math.max(seg.live || 0, seg.seconds || 0);
+      if (seg.format !== 'ogg') return null;
+      return Store.chunks(seg.local, 0, 16 * 1024).then(function (first) {
+        // Pagina 0 = OpusHead (inizio del flusso), pagina 1 = OpusTags: insieme sono l'intestazione.
+        var head = first.filter(function (p) { return p.pseq === 0 || p.pseq === 1; });
+        if (head.length && head[0].off === 0) {
+          seg.serial = new DataView(head[0].data).getUint32(14, true);
+          seg.headBytes = head.length === 2 ? head[0].len + head[1].len : 0;
+        }
+      });
     });
   }
 
