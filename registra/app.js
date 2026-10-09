@@ -186,6 +186,49 @@
     }).finally(function () { clearTimeout(timer); });
   }
 
+  /** "iOS 17.6 · Safari 17.6 · audio 48 kHz running": per capire a distanza su che telefono succede cosa. */
+  function deviceInfo() {
+    var ua = navigator.userAgent;
+    var m;
+    var os = 'altro';
+    if (isIOS) os = 'iOS ' + ((m = /OS (\d+)[_.](\d+)/.exec(ua)) ? m[1] + '.' + m[2] : '?');
+    else if ((m = /Android (\d+(?:\.\d+)?)/.exec(ua))) os = 'Android ' + m[1];
+    else if (/Windows/.test(ua)) os = 'Windows';
+    else if (/Mac OS X/.test(ua)) os = 'macOS';
+    var browser = 'browser sconosciuto';
+    if (/FBAN|FBAV/.test(ua)) browser = 'app Facebook';
+    else if (/Instagram/.test(ua)) browser = 'app Instagram';
+    else if (/WhatsApp/i.test(ua)) browser = 'app WhatsApp';
+    else if ((m = /SamsungBrowser\/(\d+)/.exec(ua))) browser = 'Samsung Internet ' + m[1];
+    else if ((m = /EdgA?\/(\d+)/.exec(ua)) || (m = /EdgiOS\/(\d+)/.exec(ua))) browser = 'Edge ' + m[1];
+    else if ((m = /CriOS\/(\d+)/.exec(ua))) browser = 'Chrome (iOS) ' + m[1];
+    else if ((m = /FxiOS\/(\d+)/.exec(ua)) || (m = /Firefox\/(\d+)/.exec(ua))) browser = 'Firefox ' + m[1];
+    else if ((m = /Chrome\/(\d+)/.exec(ua))) browser = 'Chrome ' + m[1];
+    else if ((m = /Version\/(\d+(?:\.\d+)?).*Safari/.exec(ua))) browser = 'Safari ' + m[1];
+    var standalone = window.navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    var audio = S.audio ? ' · audio ' + Math.round(S.audio.ctx.sampleRate / 100) / 10 + ' kHz ' + S.audio.ctx.state : '';
+    return os + ' · ' + browser + (standalone ? ' · dalla schermata Home' : '') + audio + ('wakeLock' in navigator ? '' : ' · schermo acceso non disponibile');
+  }
+
+  /** Segnalazione al registro del cloud (al massimo 20 per pagina aperta, senza mai disturbare la registrazione). */
+  var reportsLeft = 20;
+  function report(kind, where, message) {
+    if (reportsLeft <= 0) return;
+    reportsLeft -= 1;
+    try {
+      api({ a: 'report', token: S.token, kind: kind, where: where, message: String(message || '').slice(0, 300), device: deviceInfo() }, 20000).catch(function () {});
+    } catch (e) { /* mai bloccare la pagina per una segnalazione */ }
+  }
+
+  window.addEventListener('error', function (e) {
+    report('errore', 'pagina', (e.message || 'errore') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var reason = e.reason;
+    if (reason && reason.network) return; // rete assente: già gestita dalla coda di invio
+    report('errore', 'pagina', 'operazione non riuscita: ' + (reason && (reason.message || reason)));
+  });
+
   function toBase64(buffer) {
     var bytes = new Uint8Array(buffer);
     var parts = [];
@@ -287,9 +330,13 @@
   function renderRecordingInfo() {
     var seg = S.current || S.segments[S.segments.length - 1];
     var lesson = seg && seg.lesson;
-    top(lesson ? lesson.title : 'Registrazione', lesson ? lessonLine(lesson) + (lesson.folder ? ' · cartella ' + lesson.folder : '') : 'Nessuna lezione in calendario adesso');
+    var pending = seg && !seg.rec;
+    if (lesson) top(lesson.title, lessonLine(lesson) + (lesson.folder ? ' · cartella ' + lesson.folder : ''));
+    else if (pending) top('Registrazione', 'Collegamento al cloud…');
+    else top('Registrazione', 'Nessuna lezione in calendario adesso');
     pill('rec', 'REC');
-    $('rec-since').textContent = seg && seg.startedAt ? 'Iniziata alle ' + hhmm(seg.startedAt) + ' da ' + S.name : '';
+    var since = seg && (seg.startedAt || seg.localStart);
+    $('rec-since').textContent = since ? 'Iniziata alle ' + hhmm(since) + ' da ' + S.name : '';
   }
 
   // ─── Indicatore del livello ──────────────────────────────────────────────
@@ -331,8 +378,11 @@
     }).then(function (s) {
       stream = s;
       // Dopo il permesso del microfono: così il browser usa la frequenza reale del microfono.
+      // L'avvio del contesto audio non può mai bloccare la pagina: al massimo 1,5 s di attesa.
       var ctx = new Ctx({ latencyHint: 'playback' });
-      return ctx.resume().catch(function () {}).then(function () { return ctx.audioWorklet.addModule('worklet.js'); }).then(function () { return ctx; });
+      return Promise.race([ctx.resume().catch(function () {}), sleep(1500)])
+        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js'), 15000, 'caricamento del modulo audio'); })
+        .then(function () { return ctx; });
     }).then(function (ctx) {
       var source = ctx.createMediaStreamSource(stream);
       var node = new AudioWorkletNode(ctx, 'registratore', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
@@ -346,8 +396,14 @@
       track.onended = function () { if (S.recording) interrupt('microfono chiuso dal telefono'); };
       S.audio = { ctx: ctx, stream: stream, source: source, node: node, mute: mute, track: track, flushWaiters: [] };
       S.lastPcmAt = performance.now();
-      if (ctx.state !== 'running') return ctx.resume().catch(function () {});
-      return null;
+      if (ctx.state === 'running') return null;
+      return Promise.race([ctx.resume().catch(function () {}), sleep(1500)]).then(function () {
+        if (ctx.state === 'running') return;
+        // Alcuni telefoni avviano l'audio solo dopo un altro tocco: il primo tocco sullo schermo lo riattiva.
+        document.addEventListener('pointerdown', function () { ctx.resume().catch(function () {}); }, { once: true });
+        toast('Tocca lo schermo per avviare il microfono.');
+        report('evento', 'audio sospeso', 'contesto audio "' + ctx.state + '" dopo l\'avvio');
+      });
     }).catch(function (err) {
       if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
       throw err.code ? err : audioError(err && err.name === 'NotAllowedError' ? 'denied' : err && err.name === 'NotFoundError' ? 'nomic' : 'failed');
@@ -437,39 +493,51 @@
     if (rec.next > seg.sent) { seg.sent = rec.next; seg.next = Math.max(seg.next, rec.next); }
   }
 
-  function startButtonBusy(on) {
+  /** Pulsante del microfono durante l'avvio: animazione evidente e testo che dice cosa sta succedendo. */
+  function startButtonBusy(on, label) {
     $('start-btn').disabled = on;
-    $('start-label').textContent = on ? 'Avvio…' : 'Tocca per registrare';
+    $('start-btn').classList.toggle('mic--starting', on);
+    $('start-btn').parentElement.classList.toggle('starting', on);
+    $('start-btn').setAttribute('aria-busy', String(on));
+    $('start-label').textContent = on ? (label || 'Attivazione del microfono…') : 'Tocca per registrare';
   }
 
+  /**
+   * Avvio: appena il microfono è acceso la registrazione parte SUBITO sul telefono (schermata con il
+   * cronometro); il cloud viene avvisato in parallelo dalla coda di invio, che riprova da sola se la rete
+   * è lenta. Se nel frattempo un altro telefono ha preso il registratore, la pagina lo dice.
+   */
   function onStart() {
-    startButtonBusy(true);
+    if (S.starting) return;
+    S.starting = true;
+    startButtonBusy(true, 'Attivazione del microfono…');
+    var hint = setTimeout(function () {
+      if (S.starting) startButtonBusy(true, 'Consenti l\'uso del microfono nella richiesta del telefono');
+    }, 2500);
     openAudio().then(function () {
-      S.recording = true;
-      S.pre = [];
-      return api({ a: 'start', token: S.token }, 30000);
-    }).then(function (r) {
-      if (!r.ok) {
-        stopCapture();
-        startButtonBusy(false);
-        if (r.error === 'auth') return logout('Accesso scaduto: inserisci di nuovo il codice.');
-        if (r.error === 'busy') return refreshStatus();
-        return showError(r.message);
-      }
-      var seg = S.segments.filter(function (s) { return s.rec === r.rec.id; })[0];
-      if (seg) applyRec(seg, r.rec);
-      else { seg = newSegment(r.rec); seg.samples = Math.round(r.rec.seconds * RATE); S.segments.push(seg); }
+      var seg = newSegment(null);
+      seg.localStart = Date.now();
+      S.segments.push(seg);
       S.current = seg;
+      S.recording = true;
       S.pre.splice(0).forEach(addSamples);
       saveSegments();
+      startButtonBusy(false);
       startRecordingScreen();
       kick();
     }, function (err) {
       stopCapture();
       startButtonBusy(false);
-      if (err.network) return showError('Nessuna connessione: impossibile avviare la registrazione. Controlla la rete e riprova.');
+      report('errore', 'avvio del microfono', (err && (err.code || err.name)) + (err && err.message && err.message !== err.code ? ': ' + err.message : ''));
       micError(err);
+    }).finally(function () {
+      clearTimeout(hint);
+      S.starting = false;
     });
+  }
+
+  function withTimeout(promise, ms, what) {
+    return Promise.race([promise, sleep(ms).then(function () { throw new Error('tempo scaduto: ' + what); })]);
   }
 
   function stopCapture() {
@@ -601,8 +669,16 @@
       return null;
     }
     if (r.error === 'closed') return reopen(seg, r);
-    if (r.error === 'auth') { logout('Accesso scaduto: inserisci di nuovo il codice. L\'audio registrato resta sul telefono e verrà inviato.'); return 'blocked'; }
+    if (r.error === 'auth') {
+      // Codice cambiato: il microfono si spegne; l'audio già registrato resta e parte dopo il nuovo accesso.
+      if (S.recording) stopCapture();
+      if (S.current) { closePiece(); S.current.stopping = true; S.current.reason = 'manual'; S.current = null; }
+      saveSegments();
+      logout('Accesso scaduto: inserisci di nuovo il codice. L\'audio registrato resta sul telefono e verrà inviato.');
+      return 'blocked';
+    }
     if (r.error === 'not_owner' || r.error === 'busy') return blocked(r);
+    if (r.error !== 'retry') report('errore', 'risposta del cloud', r.error + ': ' + (r.message || ''));
     throw new NetError(r.message || r.error);
   }
 
@@ -639,7 +715,7 @@
   }
 
   function openSegment(seg) {
-    return api({ a: 'start', token: S.token }, 30000).then(function (r) {
+    return api({ a: 'start', token: S.token, client: deviceInfo() }, 30000).then(function (r) {
       if (!r.ok) return handleRefusal(seg, r);
       if (r.resumed && r.rec.next !== seg.sent) {
         // Una registrazione di questo telefono era rimasta aperta: si chiude, poi se ne apre una nuova.
@@ -664,14 +740,26 @@
     });
   }
 
-  /** Un altro telefono ha il registratore: niente più audio da qui; quello già registrato aspetta. */
+  /** Un altro telefono ha il registratore: niente più audio da qui. */
   function blocked(r) {
-    if (S.recording) {
+    var who = r.active ? r.active.name : '';
+    var seg = S.segments[0];
+    if (seg && !seg.rec && seg === S.current) {
+      // Appena avviata, ma un altro telefono ha preso il registratore un attimo prima: la lezione è coperta,
+      // questi secondi non servono.
       stopCapture();
-      if (S.current) { S.current.stopping = true; S.current.reason = 'manual'; S.current = null; }
+      S.current = null;
+      S.segments.shift();
+      Store.list(seg.local).then(function (rows) { rows.forEach(function (p) { Store.del(seg.local, p.seq); }); });
       saveSegments();
-      toast((r.active ? r.active.name + ' ha preso il registratore' : 'Il registratore è occupato') + ': l\'audio già registrato resta sul telefono e verrà inviato appena si libera.');
+      showError((who ? who + ' ha iniziato a registrare un attimo prima di te' : 'Il registratore è occupato') + ': la lezione è già coperta.');
+    } else if (S.recording || S.current) {
+      if (S.recording) stopCapture();
+      if (S.current) { closePiece(); S.current.stopping = true; S.current.reason = 'manual'; S.current = null; }
+      saveSegments();
+      toast((who ? who + ' ha preso il registratore' : 'Il registratore è occupato') + ': l\'audio già registrato resta sul telefono e verrà inviato appena si libera.');
     }
+    if (S.screen === 'recording' || S.screen === 'interrupted') show('loading');
     refreshStatus();
     return 'blocked';
   }
@@ -691,6 +779,13 @@
       $('saved-sub').textContent = Math.round(waiting) + ' s al sicuro sul telefono';
       return;
     }
+    var current = S.current;
+    if (current && !current.rec) {
+      $('saved-icon').className = 'row-icon row-icon--amber';
+      $('saved-title').textContent = 'Collegamento al cloud…';
+      $('saved-sub').textContent = 'l\'audio è già al sicuro sul telefono';
+      return;
+    }
     $('saved-icon').className = 'row-icon row-icon--green';
     $('saved-title').textContent = 'Salvato nel cloud';
     if (!S.lastAckAt) { $('saved-sub').textContent = 'il primo pezzo parte dopo 10 s'; return; }
@@ -705,6 +800,9 @@
   function interrupt(why) {
     if (!S.recording || S.interrupted) return;
     S.interrupted = { at: Date.now() - Math.max(0, performance.now() - S.lastPcmAt), why: why };
+    var a = S.audio;
+    report('evento', 'interruzione', why + (a ? ' · audio "' + a.ctx.state + '", microfono "' + (a.track ? a.track.readyState + (a.track.muted ? ', muto' : '') : '?') + '"' : '') +
+      ' · ' + clock(S.current ? S.current.samples / RATE : 0) + ' registrati');
     closePiece();
     stopCapture();
     S.recording = true; // la registrazione nel cloud resta aperta: si riprende nello stesso file
@@ -727,12 +825,18 @@
 
   function onResume() {
     $('resume-btn').disabled = true;
+    var gap = S.interrupted ? (Date.now() - S.interrupted.at) / 1000 : 0;
     openAudio().then(function () {
       S.audioPaused = false;
       S.interrupted = null;
       S.recording = true;
+      report('evento', 'ripresa', 'registrazione ripresa dopo ' + duration(gap));
       startRecordingScreen();
-    }, function (err) { micError(err); }).finally(function () { $('resume-btn').disabled = false; });
+      kick();
+    }, function (err) {
+      report('errore', 'ripresa', (err && (err.code || err.name)) || 'errore');
+      micError(err);
+    }).finally(function () { $('resume-btn').disabled = false; });
   }
 
   function onEndHere() {
@@ -793,7 +897,10 @@
       navigator.wakeLock.request('screen').then(function (lock) {
         S.wakeLock = lock;
         lock.addEventListener('release', function () { if (S.wakeLock === lock) S.wakeLock = null; });
-      }, function () { /* negato (per esempio risparmio energetico): riprova al prossimo cambio */ }).finally(function () { S.wakeRequesting = false; });
+      }, function (err) {
+        // Negato (per esempio risparmio energetico): si riprova al prossimo cambio; segnalato una volta sola.
+        if (!S.wakeReported) { S.wakeReported = true; report('evento', 'schermo sempre acceso', 'non concesso: ' + ((err && (err.name || err.message)) || 'motivo sconosciuto')); }
+      }).finally(function () { S.wakeRequesting = false; });
     } else if (!want && S.wakeLock) {
       var lock = S.wakeLock;
       S.wakeLock = null;
@@ -1033,7 +1140,12 @@
       if (document.visibilityState === 'visible') {
         var hiddenFor = S.hiddenAt ? (Date.now() - S.hiddenAt) / 1000 : 0;
         S.hiddenAt = 0;
-        if (isIOS && S.screen === 'recording' && hiddenFor > 2) {
+        if (S.recording && hiddenFor > 5) {
+          var flowing = performance.now() - S.lastPcmAt < 3000;
+          report('evento', 'pagina nascosta', 'per ' + duration(hiddenFor) + ' durante la registrazione; audio ' + (flowing ? 'continuato' : 'fermo') +
+            (S.audio ? ' ("' + S.audio.ctx.state + '")' : ''));
+        }
+        if (isIOS && S.screen === 'recording' && hiddenFor > 2 && performance.now() - S.lastPcmAt >= 3000) {
           showError('Mentre la pagina era nascosta, iPhone ha messo in pausa il microfono: circa ' + duration(hiddenFor) + ' non registrati.');
         }
         if (S.audio && S.audio.ctx.state !== 'running') S.audio.ctx.resume().catch(function () {});

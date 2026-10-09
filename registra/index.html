@@ -120,6 +120,10 @@
     }
     .mic:active { transform: scale(.96); }
     .mic:disabled { cursor: progress; opacity: .7; }
+    /* Avvio: il pulsante "respira" e un anello gira attorno, finché il microfono non è acceso */
+    .mic.mic--starting { opacity: 1; animation: breathe 1.1s ease-in-out infinite; }
+    .mic-wrap.starting::after { inset: 4px; border: 4px solid rgba(165, 180, 252, .18); border-top-color: #c7d2fe; animation: spin .9s linear infinite; }
+    @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(.93); } }
     .mic--locked { background: rgba(255, 255, 255, .04); border: 2px dashed rgba(255, 255, 255, .18); color: #7d87a6; box-shadow: none; cursor: not-allowed; }
     .big-label { font-size: 22px; font-weight: 800; letter-spacing: -.01em; }
     .hint { margin: 6px auto 0; font-size: 14px; color: var(--muted); max-width: 32ch; }
@@ -363,11 +367,11 @@
       </div>
       <div class="notice notice--amber" id="ios-warning" hidden>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l9.5 16.5h-19z"/><path d="M12 10v4.5M12 17.5v.01"/></svg>
-        <span>Resta su questa pagina: su iPhone, uscire o bloccare lo schermo mette in pausa il microfono.</span>
+        <span>Resta su questa pagina: su iPhone, uscire, bloccare lo schermo o usare la dettatura vocale mette in pausa il microfono.</span>
       </div>
       <div class="notice notice--info" id="android-note" hidden>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></svg>
-        <span>Puoi spegnere lo schermo o usare altre app: la registrazione continua. Non chiudere la scheda.</span>
+        <span>Puoi spegnere lo schermo: la registrazione continua. Non chiudere la scheda e non usare app che prendono il microfono (dettatura vocale, chiamate, messaggi vocali).</span>
       </div>
       <button class="stop" id="stop-btn" type="button" aria-describedby="stop-help">
         <span class="fill" id="stop-fill"></span>
