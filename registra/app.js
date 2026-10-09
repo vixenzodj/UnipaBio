@@ -132,13 +132,18 @@
     wakeLock: null,
     levels: [],
     cutting: false,
+    stopping: null, // segmento in chiusura (arresto premuto): la pagina mostra quanto audio resta da inviare
+    net: { pieces: 0, totalMs: 0, maxMs: 0, maxBacklog: 0 },
   };
 
   function pieceSamples() { return Math.round((S.settings.pieceSeconds || 10) * RATE); }
   function serverNow() { return Date.now() + S.serverOffset; }
   function saveSegments() {
     var plain = S.segments.map(function (s) {
-      return { local: s.local, rec: s.rec, next: s.next, sent: s.sent, stopping: s.stopping, reason: s.reason, samples: s.samples, lesson: s.lesson, stopAt: s.stopAt, then: s.then, startedAt: s.startedAt };
+      return {
+        local: s.local, rec: s.rec, next: s.next, sent: s.sent, stopping: s.stopping, reason: s.reason, samples: s.samples, lesson: s.lesson,
+        stopAt: s.stopAt, then: s.then, startedAt: s.startedAt, lessonId: s.lessonId || null, lessonHint: s.lessonHint || null,
+      };
     });
     return Store.setMeta('segments', plain);
   }
@@ -487,6 +492,7 @@
   function applyRec(seg, rec) {
     seg.rec = rec.id;
     seg.lesson = rec.lesson || null;
+    if (rec.lesson && rec.lesson.id) seg.lessonId = rec.lesson.id;
     seg.stopAt = rec.stopAt || null;
     seg.then = rec.then || null;
     seg.startedAt = rec.startedAt;
@@ -563,6 +569,9 @@
     var seg = S.current;
     $('stop-btn').disabled = true;
     $('stop-text').textContent = 'Invio degli ultimi secondi…';
+    S.stopping = seg;
+    $('stop-help').textContent = 'Non chiudere la pagina finché non compare «Registrazione inviata».';
+    $('stop-help').hidden = false;
     return flushAudio().then(function () {
       stopCapture();
       return closePiece();
@@ -634,6 +643,7 @@
       S.up.failures += 1;
       updateSaved();
       var wait = Math.min(15000, 2000 * Math.pow(2, Math.min(S.up.failures - 1, 3)));
+      if (S.stopping) wait = Math.min(wait, 4000); // in chiusura si riprova più spesso: chi registra sta aspettando
       return new Promise(function (resolve) {
         var timer = setTimeout(resolve, wait);
         S.up.waiting = function () { clearTimeout(timer); resolve(); };
@@ -642,8 +652,14 @@
   }
 
   function sendPiece(seg, piece) {
+    var t0 = Date.now();
     return api({ a: 'piece', token: S.token, rec: seg.rec, seq: piece.seq, data: toBase64(piece.data) }, 60000).then(function (r) {
       if (r.ok) {
+        // Statistiche della rete (inviate al cloud a fine registrazione, per la diagnostica).
+        var ms = Date.now() - t0;
+        S.net.pieces += 1;
+        S.net.totalMs += ms;
+        S.net.maxMs = Math.max(S.net.maxMs, ms);
         var acked = r.next;
         var drop = [];
         for (var s = seg.sent; s < acked; s += 1) drop.push(Store.del(seg.local, s));
@@ -699,6 +715,8 @@
       seg.stopping = old.stopping;
       seg.reason = old.reason;
       seg.onStopped = old.onStopped;
+      // Audio già registrato (non quello che sta arrivando adesso): resta abbinato alla sua lezione.
+      if (!isCurrent) seg.lessonHint = old.lessonId || old.lessonHint || null;
       var chain = Promise.resolve();
       rest.forEach(function (p, i) {
         chain = chain.then(function () { return Store.put(seg.local, i, p.data); }).then(function () { return Store.del(old.local, p.seq); });
@@ -715,7 +733,7 @@
   }
 
   function openSegment(seg) {
-    return api({ a: 'start', token: S.token, client: deviceInfo() }, 30000).then(function (r) {
+    return api({ a: 'start', token: S.token, client: deviceInfo(), lesson: seg.lessonHint || undefined }, 30000).then(function (r) {
       if (!r.ok) return handleRefusal(seg, r);
       if (r.resumed && r.rec.next !== seg.sent) {
         // Una registrazione di questo telefono era rimasta aperta: si chiude, poi se ne apre una nuova.
@@ -728,8 +746,17 @@
     });
   }
 
+  /** "720 pezzi · invio medio 3,1 s per 10 s di audio · più lento 12,4 s · ritardo massimo 40 s" */
+  function netSummary() {
+    var n = S.net;
+    if (!n.pieces) return '';
+    var s = function (ms) { return (ms / 1000).toFixed(1).replace('.', ','); };
+    return n.pieces + ' pezzi · invio medio ' + s(n.totalMs / n.pieces) + ' s per 10 s di audio · più lento ' + s(n.maxMs) +
+      ' s · ritardo massimo accumulato ' + duration(n.maxBacklog);
+  }
+
   function finishSegment(seg) {
-    return api({ a: 'stop', token: S.token, rec: seg.rec, seq: seg.next, reason: seg.reason }, 60000).then(function (r) {
+    return api({ a: 'stop', token: S.token, rec: seg.rec, seq: seg.next, reason: seg.reason, net: netSummary() }, 60000).then(function (r) {
       if (!r.ok && r.error === 'gap') { seg.sent = r.next; return null; }
       if (!r.ok && r.error === 'closed') r = { ok: true, summary: r.saved };
       if (!r.ok) return handleRefusal(seg, r);
@@ -862,9 +889,15 @@
     }
     if (S.screen === 'recording') {
       var seg = S.current;
-      $('timer').textContent = clock(seg ? seg.samples / RATE : 0);
+      if (seg) $('timer').textContent = clock(seg.samples / RATE);
       updateSaved();
       if (seg && seg.stopAt && serverNow() >= seg.stopAt) cut(seg.then ? 'next' : 'end');
+      if (seg) S.net.maxBacklog = Math.max(S.net.maxBacklog, Math.max(0, seg.next - seg.sent) * (S.settings.pieceSeconds || 10));
+      if (S.stopping) {
+        // Arresto: quanto audio resta da inviare (di solito pochi secondi; di più solo se la rete era lenta).
+        var left = pendingSeconds();
+        $('stop-text').textContent = left >= 1 ? 'Invio di ' + duration(left) + ' di audio…' : 'Chiusura del file nel cloud…';
+      }
     }
     if (S.screen === 'interrupted' && S.interrupted) {
       var gap = (Date.now() - S.interrupted.at) / 1000;
@@ -967,6 +1000,10 @@
 
   function showDone(summary) {
     S.recording = false;
+    S.stopping = null;
+    S.net = { pieces: 0, totalMs: 0, maxMs: 0, maxBacklog: 0 };
+    $('stop-help').hidden = true;
+    $('stop-help').textContent = 'Tieni premuto il pulsante per circa un secondo.';
     var s = summary || {};
     var auto = s.reason && /automatic/.test(s.reason);
     $('done-title').textContent = s.file ? 'Registrazione inviata' : 'Registrazione chiusa';
@@ -1181,6 +1218,10 @@
   window.__registratore = {
     state: S,
     interrupt: function () { if (S.audio && S.audio.track) { S.audio.track.stop(); interrupt('test'); } },
+    // Prove di durata: il microfono resta acceso ma i suoi campioni vengono ignorati, e l'audio di prova entra
+    // dallo stesso punto del microfono (stesso percorso: pezzi, memoria del telefono, coda di invio).
+    detachMic: function () { if (S.audio) S.audio.node.port.onmessage = function (e) { if (e.data.type === 'level') pushLevel(e.data.rms); }; },
+    feed: function (int16) { onWorklet({ data: { type: 'pcm', pcm: int16.buffer } }); },
   };
 
   boot();
