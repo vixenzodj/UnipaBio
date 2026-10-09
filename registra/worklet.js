@@ -1,11 +1,14 @@
 /*
  * worklet.js — elaborazione audio del registratore (AudioWorklet, fuori dal thread della pagina).
  *
- * Microfono (di solito 44.100 o 48.000 Hz) → 22.050 Hz, mono, 16 bit: lo stesso formato del
- * registratore di sempre. Prima del ricampionamento un filtro passa-basso di 6° ordine (Butterworth,
- * 9,8 kHz) toglie le frequenze che a 22.050 Hz diventerebbero distorsione; poi l'interpolazione
- * lineare calcola i campioni ai nuovi istanti. Alla pagina arrivano blocchi da 1 secondo e, ogni
- * 100 ms, il livello del segnale per l'indicatore.
+ * Microfono (di solito 44.100 o 48.000 Hz) → frequenza di destinazione, mono. Prima del ricampionamento
+ * un filtro passa-basso di 6° ordine (Butterworth, al 44% della frequenza di destinazione) toglie le
+ * frequenze che diventerebbero distorsione; poi l'interpolazione lineare calcola i campioni ai nuovi istanti.
+ *
+ *  - modalità "float" (registratore attuale): 24.000 Hz in virgola mobile, a blocchi da 0,5 s, per il
+ *    codificatore Opus del telefono (WebCodecs);
+ *  - modalità predefinita (versione precedente): 22.050 Hz, 16 bit, a blocchi da 1 s.
+ * Ogni 100 ms arriva anche il livello del segnale per l'indicatore.
  */
 
 function lowpass(fs, f0, q) {
@@ -29,22 +32,26 @@ function lowpass(fs, f0, q) {
 }
 
 class Registratore extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
-    this.target = 22050;
+    const o = (options && options.processorOptions) || {};
+    this.float = Boolean(o.float);
+    this.target = o.targetRate || 22050;
     this.ratio = sampleRate / this.target; // campioni in ingresso per ogni campione in uscita
     this.pos = 0; // posizione (in campioni d'ingresso, rispetto al blocco attuale) del prossimo campione in uscita
     this.prev = 0;
-    // Butterworth di 6° ordine a 9,8 kHz (tre biquad in cascata): la voce passa intatta, sopra gli
-    // 11 kHz (limite dei 22.050 Hz) quasi niente arriva al ricampionamento.
+    // Butterworth di 6° ordine (tre biquad in cascata) al 44% della frequenza di destinazione.
+    const cutoff = this.target * 0.444;
     this.filters = sampleRate > this.target * 1.02
-      ? [lowpass(sampleRate, 9800, 0.5176), lowpass(sampleRate, 9800, 0.7071), lowpass(sampleRate, 9800, 1.9319)]
+      ? [lowpass(sampleRate, cutoff, 0.5176), lowpass(sampleRate, cutoff, 0.7071), lowpass(sampleRate, cutoff, 1.9319)]
       : [];
     this.tmp = new Float32Array(128);
-    this.out = new Int16Array(this.target);
+    this.blockLength = this.float ? Math.round(this.target / 2) : this.target;
+    this.out = this.float ? new Float32Array(this.blockLength) : new Int16Array(this.blockLength);
     this.n = 0;
     this.sq = 0;
     this.sqCount = 0;
+    this.levelEvery = Math.round(this.target / 10);
     this.running = true;
     this.port.onmessage = (event) => {
       if (event.data === 'flush' || event.data === 'stop') {
@@ -52,31 +59,31 @@ class Registratore extends AudioWorkletProcessor {
         if (event.data === 'stop') this.running = false;
       }
     };
-    this.port.postMessage({ type: 'ready', inputRate: sampleRate });
+    this.port.postMessage({ type: 'ready', inputRate: sampleRate, targetRate: this.target, float: this.float });
   }
 
   flush(requested) {
-    const pcm = this.out.slice(0, this.n);
-    this.port.postMessage({ type: 'pcm', pcm: pcm.buffer, flushed: Boolean(requested) }, [pcm.buffer]);
+    const part = this.out.slice(0, this.n);
+    this.port.postMessage({ type: this.float ? 'f32' : 'pcm', pcm: part.buffer, flushed: Boolean(requested) }, [part.buffer]);
     this.n = 0;
   }
 
   push(value) {
     const v = value > 1 ? 1 : value < -1 ? -1 : value;
-    const s = v < 0 ? Math.round(v * 32768) : Math.round(v * 32767);
-    this.out[this.n] = s;
+    if (this.float) this.out[this.n] = v;
+    else this.out[this.n] = v < 0 ? Math.round(v * 32768) : Math.round(v * 32767);
     this.n += 1;
     this.sq += v * v;
     this.sqCount += 1;
-    if (this.sqCount >= 2205) {
+    if (this.sqCount >= this.levelEvery) {
       this.port.postMessage({ type: 'level', rms: Math.sqrt(this.sq / this.sqCount) });
       this.sq = 0;
       this.sqCount = 0;
     }
     if (this.n === this.out.length) {
       const full = this.out;
-      this.port.postMessage({ type: 'pcm', pcm: full.buffer }, [full.buffer]);
-      this.out = new Int16Array(this.target);
+      this.port.postMessage({ type: this.float ? 'f32' : 'pcm', pcm: full.buffer }, [full.buffer]);
+      this.out = this.float ? new Float32Array(this.blockLength) : new Int16Array(this.blockLength);
       this.n = 0;
     }
   }

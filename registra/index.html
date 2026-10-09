@@ -223,7 +223,23 @@
     .step-title { font-weight: 700; font-size: 14.5px; padding-top: 3px; }
     .step-sub { font-size: 12.5px; color: var(--muted); }
 
-    .banner { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 10; width: min(430px, calc(100% - 32px)); }
+    /* Copie sul telefono */
+    .copies { padding: 6px 16px; }
+    .copies-head { display: flex; align-items: center; gap: 10px; padding: 10px 0 4px; }
+    .copy { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+    .copy + .copy { border-top: 1px solid rgba(255, 255, 255, .07); }
+    .copy-text { flex: 1; min-width: 0; }
+    .copy-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .copy-sub { font-size: 12px; color: var(--muted); }
+    .copy-sub--warn { color: var(--amber-soft); }
+    .copy-btn { flex: none; height: 34px; padding: 0 14px; border-radius: 10px; border: 1px solid rgba(165, 180, 252, .35); background: rgba(99, 102, 241, .12); color: #c7d2fe; font-weight: 700; font-size: 13px; }
+    .stop-panel .row { padding: 12px 14px; }
+    .stop-panel .btn { height: 46px; font-size: 14.5px; }
+
+    /* Avvisi: solo informativi, mai sopra un pulsante (i tocchi passano sotto); durante la registrazione in alto,
+       lontano da "tieni premuto per terminare". */
+    .banner { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 10; width: min(430px, calc(100% - 32px)); pointer-events: none; }
+    body[data-screen="recording"] .banner, body[data-screen="interrupted"] .banner { top: max(12px, env(safe-area-inset-top)); bottom: auto; }
     .spinner { width: 18px; height: 18px; border-radius: 50%; border: 2.5px solid rgba(255, 255, 255, .35); border-top-color: #fff; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
@@ -330,6 +346,13 @@
           </span>
         </div>
       </div>
+      <div class="card copies" id="copies-card" hidden>
+        <div class="copies-head">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M12 8v6M9.5 11.5L12 14l2.5-2.5"/></svg>
+          <span class="label" style="flex: 1">Copie su questo telefono</span>
+        </div>
+        <div id="copies-list"></div>
+      </div>
       <div class="foot">
         <span>Nome sul registratore: <strong id="me-name" style="color: var(--text)"></strong></span>
         <button class="link-btn" type="button" id="change-name">Cambia</button>
@@ -379,6 +402,21 @@
         <span id="stop-text">Tieni premuto per terminare</span>
       </button>
       <p class="small muted" id="stop-help" style="margin: -8px 0 0; text-align: center" hidden>Tieni premuto il pulsante per circa un secondo.</p>
+      <div class="card stop-panel" id="stop-panel" role="status" aria-live="polite" hidden>
+        <div class="row">
+          <span class="row-icon row-icon--green" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
+          </span>
+          <span class="row-text"><span class="row-title">Salvata sul telefono</span><span class="row-sub" id="stop-phone-sub">chiusura del file…</span></span>
+        </div>
+        <div class="row">
+          <span class="row-icon row-icon--amber" id="stop-cloud-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10a4 4 0 0 0 .8-7.9A5.5 5.5 0 0 0 7.2 9.4 4.5 4.5 0 0 0 7 18.5z"/><path d="M12 11v5M9.5 13.5L12 11l2.5 2.5"/></svg>
+          </span>
+          <span class="row-text"><span class="row-title" id="stop-cloud-title">Cloud: invio in corso</span><span class="row-sub" id="stop-cloud-sub"></span></span>
+        </div>
+        <div class="row"><button class="btn btn--ghost" id="stop-download" type="button">Scarica la copia del telefono</button></div>
+      </div>
     </section>
 
     <!-- Occupato -->
@@ -431,8 +469,8 @@
     <section class="screen" id="screen-done" hidden>
       <div class="hero">
         <div class="check" aria-hidden="true"><svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
-        <h1 class="title-xl" id="done-title">Registrazione inviata</h1>
-        <p id="done-text">Puoi chiudere la pagina: al resto pensa il sistema.</p>
+        <h1 class="title-xl" id="done-title">Salvata nel cloud</h1>
+        <p id="done-text">Il file è nel cloud da questo momento: puoi chiudere la pagina.</p>
       </div>
       <div class="card" style="padding: 6px 18px">
         <div class="kv"><span class="muted">Lezione</span><strong id="done-lesson"></strong></div>
@@ -441,11 +479,14 @@
         <div class="kv"><span class="muted">Cartella su Drive</span><strong id="done-folder"></strong></div>
       </div>
       <div class="steps">
-        <div class="step"><div class="step-rail"><span class="step-dot step-dot--done"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span class="step-line"></span></div><div><div class="step-title">Salvata nel cloud</div><div class="step-sub">Ogni secondo di audio è arrivato</div></div></div>
-        <div class="step"><div class="step-rail"><span class="step-dot step-dot--next"></span><span class="step-line"></span></div><div><div class="step-title">Abbinata al calendario e rinominata</div><div class="step-sub">Entro pochi minuti</div></div></div>
-        <div class="step"><div class="step-rail"><span class="step-dot step-dot--later"></span></div><div><div class="step-title">Su Drive, pronta per NotebookLM</div><div class="step-sub" id="done-split">Oltre 200 MB viene divisa in _1 e _2</div></div></div>
+        <div class="step"><div class="step-rail"><span class="step-dot step-dot--done"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span class="step-line"></span></div><div><div class="step-title">Salvata nel cloud</div><div class="step-sub" id="done-cloud-sub">Ogni secondo di audio è arrivato</div></div></div>
+        <div class="step"><div class="step-rail"><span class="step-dot step-dot--next"></span><span class="step-line"></span></div><div><div class="step-title">Abbinata al calendario e rinominata</div><div class="step-sub">Parte da sola entro un minuto</div></div></div>
+        <div class="step"><div class="step-rail"><span class="step-dot step-dot--later"></span></div><div><div class="step-title">Su Drive, pronta per NotebookLM</div><div class="step-sub">Nella cartella della lezione, in formato Ogg (Opus)</div></div></div>
       </div>
-      <button class="btn btn--ghost" id="done-back" type="button" style="margin-top: auto">Torna all'inizio</button>
+      <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px">
+        <button class="btn btn--ghost" id="done-download" type="button" hidden>Scarica una copia sul telefono</button>
+        <button class="btn btn--ghost" id="done-back" type="button">Torna all'inizio</button>
+      </div>
     </section>
 
     <!-- Messaggi (registratore non attivo, microfono negato, errori) -->
@@ -461,6 +502,8 @@
 
   <div class="banner" id="banner" hidden><div class="notice notice--red" role="status" aria-live="polite"><span id="banner-text"></span></div></div>
 
-  <script src="app.js"></script>
+  <!-- Versione nei nomi: il telefono carica sempre insieme i file della stessa versione (GitHub Pages li tiene in cache). -->
+  <script src="motore.js?v=20261009o"></script>
+  <script src="app.js?v=20261009o"></script>
 </body>
 </html>
