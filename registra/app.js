@@ -213,6 +213,7 @@
     segments: [], // coda: il primo è quello che si sta inviando
     current: null, // segmento che riceve l'audio
     archive: [], // copie sul telefono delle registrazioni già nel cloud
+    copySel: new Set(), // copie selezionate nella schermata "Registrazioni sul telefono"
     lastPcmAt: 0,
     recording: false,
     interrupted: null, // { at, why }
@@ -392,7 +393,7 @@
 
   // ─── Schermate ────────────────────────────────────────────────────────────
 
-  var SCREENS = ['loading', 'login', 'ready', 'recording', 'busy', 'interrupted', 'done', 'message'];
+  var SCREENS = ['loading', 'login', 'ready', 'recording', 'busy', 'interrupted', 'done', 'message', 'copies'];
   var WITH_HEADER = { ready: 1, recording: 1, busy: 1, interrupted: 1 };
 
   function show(name) {
@@ -475,6 +476,10 @@
       $('busy-hint').textContent = 'Il telefono di ' + a.name + ' non dà segnali da ' + duration(a.silentMs / 1000);
       $('busy-text').textContent = 'Puoi registrare tu: la registrazione di ' + a.name + ' viene salvata così com\'è.';
       $('takeover-btn').hidden = false;
+    } else if (a.paused) {
+      $('busy-hint').textContent = a.name + ' ha messo in pausa la registrazione';
+      $('busy-text').textContent = 'È la pausa della lezione: il registratore resta di ' + a.name + ' finché riprende (fino a 45 minuti). La registrazione arriverà su Drive dopo la fine.';
+      $('takeover-btn').hidden = true;
     } else {
       $('busy-hint').textContent = 'Il pulsante si sblocca quando ' + a.name + ' termina';
       $('busy-text').textContent = 'La registrazione di ' + a.name + ' arriverà su Drive dopo la fine. Se il suo telefono si spegne, il registratore si libera da solo entro 2 minuti.';
@@ -552,7 +557,7 @@
       // L'avvio del contesto audio non può mai bloccare la pagina: al massimo 1,5 s di attesa.
       var ctx = new Ctx({ latencyHint: 'playback' });
       return Promise.race([ctx.resume().catch(function () {}), sleep(1500)])
-        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261009p'), 15000, 'caricamento del modulo audio'); })
+        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261010q'), 15000, 'caricamento del modulo audio'); })
         .then(function () { return ctx; });
     }).then(function (ctx) {
       var source = ctx.createMediaStreamSource(stream);
@@ -853,6 +858,9 @@
     $('stop-btn').disabled = false;
     $('stop-text').textContent = 'Tieni premuto per terminare';
     $('stop-panel').hidden = true;
+    $('pause-btn').disabled = false;
+    $('pause-btn').hidden = false;
+    $('pause-help').hidden = false;
     show('recording');
     updateSaved();
   }
@@ -865,6 +873,8 @@
     var seg = S.current;
     if (!seg || S.stopping) return Promise.resolve();
     $('stop-btn').disabled = true;
+    $('pause-btn').hidden = true; // dopo "termina" non c'è più niente da mettere in pausa
+    $('pause-help').hidden = true;
     $('stop-text').textContent = 'Salvataggio…';
     S.stopping = seg;
     S.stopPressedAt = Date.now();
@@ -1058,6 +1068,7 @@
     return api({
       a: 'append', token: S.token, rec: seg.rec, offset: seg.sent, data: b64, seconds: list[list.length - 1].sec,
       pending: Math.max(0, seg.bytes - end) + otherPendingBytes(seg), recorded: seg.live || seg.seconds,
+      paused: pausedByUser(), // l'audio registrato prima della pausa non deve cancellarla nel cloud
     }, timeout).then(function (r) {
       if (!r.ok) return handleRefusal(seg, r);
       var ms = Date.now() - t0;
@@ -1099,6 +1110,7 @@
     saveSegments();
     if (seg.cont) Store.dropChunks(seg.local); // copia parziale: quella completa è già tra le copie
     else archiveSegment(seg, summary, true);
+    if (S.screen === 'copies') renderCopiesManager(); // appena arrivata nel cloud diventa eliminabile
     if (seg.onStopped) seg.onStopped(summary, seg);
   }
 
@@ -1450,16 +1462,24 @@
 
   // ─── Segnale di vita ──────────────────────────────────────────────────────
 
-  /** Se l'audio non riesce a partire da 30 s, un segnale di pochi byte: il cloud sa che si registra ancora. */
-  function beat() {
+  /** La registrazione è in pausa per scelta (pulsante "Metti in pausa"), non per un'interruzione. */
+  function pausedByUser() {
+    return Boolean(S.audioPaused && S.interrupted && S.interrupted.manual);
+  }
+
+  /**
+   * Se l'audio non riesce a partire da 30 s, un segnale di pochi byte: il cloud sa che si registra ancora.
+   * In pausa il segnale lo dichiara (force: subito, appena messa in pausa).
+   */
+  function beat(force) {
     var seg = S.segments[0];
     if (!seg || !seg.rec || S.beating || !S.token) return;
     var now = Date.now();
-    if (now - Math.max(S.lastAckAt, S.lastBeatAt) < BEAT_MS) return;
+    if (!force && now - Math.max(S.lastAckAt, S.lastBeatAt) < BEAT_MS) return;
     S.beating = true;
     S.lastBeatAt = now;
     var recorded = S.current ? S.current.live || S.current.seconds : seg.seconds || 0;
-    api({ a: 'beat', token: S.token, rec: seg.rec, pending: pendingBytes(), recorded: recorded }, 60000).then(function (r) {
+    api({ a: 'beat', token: S.token, rec: seg.rec, pending: pendingBytes(), recorded: recorded, paused: pausedByUser() }, 60000).then(function (r) {
       if (r.ok) {
         S.net.beats += 1;
         if (r.server) S.serverOffset = r.server - Date.now();
@@ -1474,12 +1494,13 @@
 
   // ─── Interruzioni (telefonata, schermo bloccato su iPhone, app in primo piano) ──
 
-  function interrupt(why) {
+  /** manual = pausa voluta (pulsante "Metti in pausa"): stessa sospensione, ma dichiarata al cloud e senza schermo acceso. */
+  function interrupt(why, manual) {
     if (!S.recording || S.interrupted) return;
-    S.interrupted = { at: Date.now() - Math.max(0, performance.now() - S.lastPcmAt), why: why };
+    S.interrupted = { at: manual ? Date.now() : Date.now() - Math.max(0, performance.now() - S.lastPcmAt), why: why, manual: Boolean(manual) };
     var a = S.audio;
     var seg = S.current;
-    report('evento', 'interruzione', why + (a ? ' · audio "' + a.ctx.state + '", microfono "' + (a.track ? a.track.readyState + (a.track.muted ? ', muto' : '') : '?') + '"' : '') +
+    report('evento', manual ? 'pausa' : 'interruzione', why + (a ? ' · audio "' + a.ctx.state + '", microfono "' + (a.track ? a.track.readyState + (a.track.muted ? ', muto' : '') : '?') + '"' : '') +
       ' · ' + clock(seg ? seg.live || seg.seconds || 0 : 0) + ' registrati');
     var e = S.engine;
     S.engine = null;
@@ -1494,14 +1515,37 @@
   function renderInterrupted() {
     var seg = S.current;
     var gap = (Date.now() - S.interrupted.at) / 1000;
+    var manual = S.interrupted.manual;
     top(seg && seg.lesson ? seg.lesson.title : 'Registrazione', seg && seg.lesson ? lessonLine(seg.lesson) : '');
     pill('warn', 'In pausa');
-    $('int-text').textContent = S.interrupted.why === 'pagina riaperta'
-      ? 'La pagina è stata chiusa o ricaricata, ma la registrazione di questo telefono è ancora aperta: puoi riprenderla o chiuderla.'
-      : 'Il microfono si è fermato: una chiamata, il blocco dello schermo o un\'altra app. Tutto quello registrato prima è al sicuro.';
+    $('int-title').textContent = manual ? 'Registrazione in pausa' : 'La registrazione si è fermata';
+    $('int-missing-label').textContent = manual ? 'In pausa da' : 'Tratto non registrato';
+    $('int-text').textContent = manual
+      ? 'Il microfono è spento e puoi bloccare il telefono. Tutto quello registrato è al sicuro. Quando la lezione ricomincia, torna qui e tocca «Riprendi»: l\'audio continua nello stesso file.'
+      : S.interrupted.why === 'pagina riaperta'
+        ? 'La pagina è stata chiusa o ricaricata, ma la registrazione di questo telefono è ancora aperta: puoi riprenderla o chiuderla.'
+        : 'Il microfono si è fermato: una chiamata, il blocco dello schermo o un\'altra app. Tutto quello registrato prima è al sicuro.';
     $('int-saved').textContent = clock(seg ? seg.live || seg.seconds || 0 : 0);
     $('int-missing').textContent = duration(gap);
     show('interrupted');
+  }
+
+  /**
+   * Pausa della lezione: gli ultimi istanti passano al codificatore, il microfono si spegne, il file resta aperto
+   * (stesso meccanismo collaudato delle interruzioni) e il cloud viene avvisato: il registratore resta di questo
+   * telefono durante la pausa. "Riprendi" continua lo stesso file; "Termina qui" lo chiude.
+   */
+  function onPause() {
+    if (S.pausingClick || !S.recording || S.audioPaused || S.stopping || !S.current || S.screen !== 'recording') return;
+    S.pausingClick = true;
+    $('pause-btn').disabled = true;
+    flushAudio().then(function () {
+      interrupt('pausa', true);
+      beat(true);
+    }).finally(function () {
+      S.pausingClick = false;
+      $('pause-btn').disabled = false;
+    });
   }
 
   function onResume() {
@@ -1631,43 +1675,146 @@
     });
   }
 
-  /** Elenco delle copie sul telefono (schermata iniziale). */
-  function renderCopies() {
+  /**
+   * Registrazioni sul telefono: prima quelle in attesa di invio (mai eliminabili: l'audio non è ancora nel
+   * cloud), poi le copie di quelle già nel cloud (eliminabili). Ognuna: { local, title, when, seconds, bytes, state, warn, deletable }.
+   */
+  function copyItems() {
     var items = [];
     S.segments.forEach(function (s) {
       if (s === S.current) return;
       // Versione precedente: sul telefono restano solo i pezzi non ancora inviati (quelli scaricabili).
-      items.push({ local: s.local, title: (s.lesson && s.lesson.title) || 'Registrazione', when: s.startedAt || s.localStart, seconds: isStream(s) ? s.seconds || s.live : (Math.max(0, s.next - s.sent) * pieceSamples()) / LEGACY_RATE, state: 'in attesa di invio', warn: true });
+      items.push({ local: s.local, title: (s.lesson && s.lesson.title) || 'Registrazione', when: s.startedAt || s.localStart, seconds: isStream(s) ? s.seconds || s.live : (Math.max(0, s.next - s.sent) * pieceSamples()) / LEGACY_RATE, bytes: isStream(s) ? s.bytes : 0, state: 'in attesa di invio', warn: true, deletable: false });
     });
     S.archive.forEach(function (a) {
-      items.push({ local: a.local, title: a.lesson || 'Registrazione', when: a.at, seconds: a.seconds, bytes: a.bytes, state: a.cloud === 'completa' ? 'nel cloud ✓' : 'nel cloud (in due file)' });
+      var pending = S.segments.some(function (s) { return s.local === a.local; });
+      items.push({ local: a.local, title: a.lesson || 'Registrazione', when: a.at, seconds: a.seconds, bytes: a.bytes, state: a.cloud === 'completa' ? 'nel cloud ✓' : 'nel cloud (in due file)', deletable: !pending });
     });
+    return items;
+  }
+
+  /** Riga di una registrazione: casella (se eliminabile e richiesta), titolo, dettagli, "Scarica". */
+  function copyRow(it, withCheck) {
+    var row = document.createElement('div');
+    row.className = 'copy';
+    if (withCheck) {
+      if (it.deletable) {
+        var box = document.createElement('input');
+        box.type = 'checkbox';
+        box.className = 'copy-check';
+        box.checked = S.copySel.has(it.local);
+        box.setAttribute('aria-label', 'Seleziona ' + it.title);
+        box.dataset.local = it.local;
+        box.addEventListener('change', function () {
+          if (box.checked) S.copySel.add(it.local);
+          else S.copySel.delete(it.local);
+          updateCopiesActions();
+        });
+        row.appendChild(box);
+      } else {
+        var slot = document.createElement('span');
+        slot.className = 'copy-check-slot';
+        row.appendChild(slot);
+      }
+    }
+    var text = document.createElement('div');
+    text.className = 'copy-text';
+    var title = document.createElement('div');
+    title.className = 'copy-title';
+    title.textContent = it.title;
+    var sub = document.createElement('div');
+    sub.className = 'copy-sub' + (it.warn ? ' copy-sub--warn' : '');
+    sub.textContent = (it.when ? dayTime(it.when) + ' · ' : '') + duration(it.seconds || 0) + (it.bytes ? ' · ' + mb(it.bytes) : '') + ' · ' + it.state;
+    text.appendChild(title);
+    text.appendChild(sub);
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.textContent = 'Scarica';
+    btn.setAttribute('aria-label', 'Scarica la copia di ' + it.title);
+    btn.addEventListener('click', function () { downloadCopy(it.local); });
+    row.appendChild(text);
+    row.appendChild(btn);
+    return row;
+  }
+
+  /** Elenco delle copie sul telefono (schermata iniziale: le ultime 8; "Gestisci" apre l'elenco completo). */
+  function renderCopies() {
+    var items = copyItems();
     $('copies-card').hidden = !items.length;
+    $('copies-manage').textContent = 'Gestisci (' + items.length + ')';
     var list = $('copies-list');
     list.textContent = '';
-    items.slice(0, 8).forEach(function (it) {
-      var row = document.createElement('div');
-      row.className = 'copy';
-      var text = document.createElement('div');
-      text.className = 'copy-text';
-      var title = document.createElement('div');
-      title.className = 'copy-title';
-      title.textContent = it.title;
-      var sub = document.createElement('div');
-      sub.className = 'copy-sub' + (it.warn ? ' copy-sub--warn' : '');
-      sub.textContent = (it.when ? dayTime(it.when) + ' · ' : '') + duration(it.seconds || 0) + (it.bytes ? ' · ' + mb(it.bytes) : '') + ' · ' + it.state;
-      text.appendChild(title);
-      text.appendChild(sub);
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'copy-btn';
-      btn.textContent = 'Scarica';
-      btn.setAttribute('aria-label', 'Scarica la copia di ' + it.title);
-      btn.addEventListener('click', function () { downloadCopy(it.local); });
-      row.appendChild(text);
-      row.appendChild(btn);
-      list.appendChild(row);
+    items.slice(0, 8).forEach(function (it) { list.appendChild(copyRow(it, false)); });
+  }
+
+  // ─── Registrazioni sul telefono: elenco completo, selezione, eliminazione ───
+
+  function openCopies() {
+    S.copySel = new Set();
+    renderCopiesManager();
+    show('copies');
+  }
+
+  function renderCopiesManager() {
+    var items = copyItems();
+    var deletable = items.filter(function (it) { return it.deletable; });
+    // Selezione valida solo per copie ancora presenti ed eliminabili.
+    var still = new Set(deletable.map(function (it) { return it.local; }));
+    Array.from(S.copySel).forEach(function (l) { if (!still.has(l)) S.copySel.delete(l); });
+    var list = $('copies-all');
+    list.textContent = '';
+    if (!items.length) {
+      var empty = document.createElement('p');
+      empty.className = 'small muted';
+      empty.textContent = 'Nessuna registrazione sul telefono.';
+      list.appendChild(empty);
+    }
+    items.forEach(function (it) { list.appendChild(copyRow(it, true)); });
+    var total = items.reduce(function (n, it) { return n + (it.bytes || 0); }, 0);
+    $('copies-space').textContent = items.length + (items.length === 1 ? ' registrazione' : ' registrazioni') + ' sul telefono · ' + mb(total) +
+      ' · ' + deletable.length + ' già nel cloud' + (items.length - deletable.length ? ', ' + (items.length - deletable.length) + ' in attesa di invio' : '');
+    $('copies-all-check').disabled = !deletable.length;
+    updateCopiesActions();
+  }
+
+  function updateCopiesActions() {
+    var n = S.copySel.size;
+    var deletable = copyItems().filter(function (it) { return it.deletable; }).length;
+    $('copies-delete').disabled = n === 0;
+    $('copies-delete').textContent = n ? 'Elimina selezionate (' + n + ')' : 'Elimina selezionate';
+    $('copies-all-check').checked = deletable > 0 && n === deletable;
+  }
+
+  function toggleAllCopies() {
+    var check = $('copies-all-check').checked;
+    S.copySel = new Set(check ? copyItems().filter(function (it) { return it.deletable; }).map(function (it) { return it.local; }) : []);
+    Array.prototype.forEach.call(document.querySelectorAll('#copies-all .copy-check'), function (box) { box.checked = S.copySel.has(box.dataset.local); });
+    updateCopiesActions();
+  }
+
+  /** Elimina dal telefono le copie selezionate: solo quelle già nel cloud (mai l'audio in attesa di invio). */
+  function deleteSelectedCopies() {
+    var ok = copyItems().filter(function (it) { return it.deletable && S.copySel.has(it.local); }).map(function (it) { return it.local; });
+    if (!ok.length) return Promise.resolve();
+    var question = 'Eliminare ' + (ok.length === 1 ? 'questa registrazione' : 'queste ' + ok.length + ' registrazioni') + ' dal telefono?\n' +
+      'Sono già nel cloud: restano su Dropbox e Drive. Sul telefono non si potranno più scaricare.';
+    if (!window.confirm(question)) return Promise.resolve();
+    $('copies-delete').disabled = true;
+    var drop = new Set(ok);
+    return Promise.all(ok.map(function (l) { return Store.dropChunks(l); })).then(function () {
+      S.archive = S.archive.filter(function (a) { return !drop.has(a.local); });
+      S.copySel = new Set();
+      return saveArchive();
+    }).then(function () {
+      renderCopiesManager();
+      toast(ok.length === 1 ? 'Registrazione eliminata dal telefono.' : ok.length + ' registrazioni eliminate dal telefono.');
     });
+  }
+
+  function closeCopies() {
+    if (S.status) { renderReady(S.status); refreshStatus(); } // subito la schermata, poi lo stato aggiornato
+    else { show('loading'); refreshStatus(true); }
   }
 
   // ─── Schermo sempre acceso ────────────────────────────────────────────────
@@ -1686,7 +1833,9 @@
       el.textContent = !supported ? 'non disponibile qui' : S.wakeWanted ? 'non si blocca da solo' : 'disattivato';
     });
     if (!supported) return;
-    var want = S.wakeWanted && document.visibilityState === 'visible' && (S.screen === 'ready' || S.screen === 'recording' || S.screen === 'interrupted');
+    // In pausa voluta lo schermo può spegnersi (il microfono è già spento).
+    var inPause = S.screen === 'interrupted' && pausedByUser();
+    var want = S.wakeWanted && document.visibilityState === 'visible' && !inPause && (S.screen === 'ready' || S.screen === 'recording' || S.screen === 'interrupted');
     if (want && !S.wakeLock && !S.wakeRequesting) {
       S.wakeRequesting = true;
       navigator.wakeLock.request('screen').then(function (lock) {
@@ -1957,6 +2106,11 @@
     $('takeover-btn').addEventListener('click', onStart);
     $('resume-btn').addEventListener('click', onResume);
     $('end-here-btn').addEventListener('click', onEndHere);
+    $('pause-btn').addEventListener('click', onPause);
+    $('copies-manage').addEventListener('click', openCopies);
+    $('copies-back').addEventListener('click', closeCopies);
+    $('copies-all-check').addEventListener('change', toggleAllCopies);
+    $('copies-delete').addEventListener('click', deleteSelectedCopies);
     $('stop-download').addEventListener('click', function () { if (S.stopping) downloadCopy(S.stopping.local); });
     $('done-back').addEventListener('click', function () { $('end-here-btn').disabled = false; $('end-here-btn').textContent = 'Termina qui'; show('loading'); refreshStatus(true); });
     $('change-name').addEventListener('click', function () { logout(''); });
@@ -1968,7 +2122,7 @@
       if (document.visibilityState === 'visible') {
         var hiddenFor = S.hiddenAt ? (Date.now() - S.hiddenAt) / 1000 : 0;
         S.hiddenAt = 0;
-        if (S.recording && hiddenFor > 5) {
+        if (S.recording && !S.audioPaused && hiddenFor > 5) {
           var flowing = performance.now() - S.lastPcmAt < 3000;
           report('evento', 'pagina nascosta', 'per ' + duration(hiddenFor) + ' durante la registrazione; audio ' + (flowing ? 'continuato' : 'fermo') +
             (S.audio ? ' ("' + S.audio.ctx.state + '")' : ''));

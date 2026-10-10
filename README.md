@@ -18,6 +18,10 @@ mostra "Salvata nel cloud" il file è su Dropbox, con la stessa dimensione della
 scaricabile; la sincronizzazione lo porta su Drive, nella cartella della lezione del calendario, entro circa un
 minuto. Registra un solo telefono alla volta.
 
+Durante la registrazione "Metti in pausa" spegne il microfono per la pausa della lezione (il registratore resta di
+chi registra fino a 45 minuti) e "Riprendi" continua lo stesso file. "Gestisci", nella scheda delle copie, apre
+l'elenco delle registrazioni sul telefono: quelle già nel cloud si possono selezionare ed eliminare dal telefono.
+
 ## Aggiungere una materia
 
 In `index.html`, sezione "Notebook delle materie", copia una scheda (`<a class="card" …>`), poi cambia il link
