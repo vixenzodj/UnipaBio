@@ -401,6 +401,7 @@
     document.body.dataset.screen = name;
     SCREENS.forEach(function (s) { $('screen-' + s).hidden = s !== name; });
     $('top').hidden = !WITH_HEADER[name];
+    if (!PLAYER_SCREENS[name] && !$('player').hidden) closePlayer();
     applyWake();
   }
 
@@ -557,7 +558,7 @@
       // L'avvio del contesto audio non può mai bloccare la pagina: al massimo 1,5 s di attesa.
       var ctx = new Ctx({ latencyHint: 'playback' });
       return Promise.race([ctx.resume().catch(function () {}), sleep(1500)])
-        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261010q'), 15000, 'caricamento del modulo audio'); })
+        .then(function () { return withTimeout(ctx.audioWorklet.addModule('worklet.js?v=20261010r'), 15000, 'caricamento del modulo audio'); })
         .then(function () { return ctx; });
     }).then(function (ctx) {
       var source = ctx.createMediaStreamSource(stream);
@@ -796,6 +797,7 @@
   function onStart() {
     if (S.starting) return;
     S.starting = true;
+    closePlayer(); // niente ascolto mentre il microfono registra
     S.mic = { seconds: 0, openMs: 0, openedAt: 0 };
     startButtonBusy(true, 'Attivazione del microfono…');
     var hint = setTimeout(function () {
@@ -1663,16 +1665,20 @@
   /** Audio WAV della versione precedente ancora sul telefono: file WAV completo (intestazione con le dimensioni). */
   function downloadLegacy(seg) {
     return Store.list(seg.local).then(function (rows) {
-      var size = 0;
-      rows.forEach(function (p) { size += p.data.byteLength; });
-      var h = new DataView(new ArrayBuffer(44));
-      var text = function (o, s) { for (var i = 0; i < s.length; i += 1) h.setUint8(o + i, s.charCodeAt(i)); };
-      text(0, 'RIFF'); h.setUint32(4, 36 + size, true); text(8, 'WAVEfmt '); h.setUint32(16, 16, true); h.setUint16(20, 1, true);
-      h.setUint16(22, 1, true); h.setUint32(24, LEGACY_RATE, true); h.setUint32(28, LEGACY_RATE * 2, true); h.setUint16(32, 2, true);
-      h.setUint16(34, 16, true); text(36, 'data'); h.setUint32(40, size, true);
-      saveBlob(new Blob([h.buffer].concat(rows.map(function (p) { return p.data; })), { type: 'audio/wav' }),
+      saveBlob(legacyWav(rows),
         copyName({ format: 'wav', at: seg.startedAt || Date.now(), lesson: (seg.lesson && seg.lesson.title) || 'Audio_rimasto' }));
     });
+  }
+
+  function legacyWav(rows) {
+    var size = 0;
+    rows.forEach(function (p) { size += p.data.byteLength; });
+    var h = new DataView(new ArrayBuffer(44));
+    var text = function (o, s) { for (var i = 0; i < s.length; i += 1) h.setUint8(o + i, s.charCodeAt(i)); };
+    text(0, 'RIFF'); h.setUint32(4, 36 + size, true); text(8, 'WAVEfmt '); h.setUint32(16, 16, true); h.setUint16(20, 1, true);
+    h.setUint16(22, 1, true); h.setUint32(24, LEGACY_RATE, true); h.setUint32(28, LEGACY_RATE * 2, true); h.setUint16(32, 2, true);
+    h.setUint16(34, 16, true); text(36, 'data'); h.setUint32(40, size, true);
+    return new Blob([h.buffer].concat(rows.map(function (p) { return p.data; })), { type: 'audio/wav' });
   }
 
   /**
@@ -1693,10 +1699,11 @@
     return items;
   }
 
-  /** Riga di una registrazione: casella (se eliminabile e richiesta), titolo, dettagli, "Scarica". */
+  /** Riga di una registrazione: casella (se eliminabile e richiesta), titolo, dettagli, ▶ (ascolto), "Scarica". */
   function copyRow(it, withCheck) {
     var row = document.createElement('div');
-    row.className = 'copy';
+    row.className = 'copy' + (P.local === it.local ? ' copy--playing' : '');
+    row.dataset.local = it.local;
     if (withCheck) {
       if (it.deletable) {
         var box = document.createElement('input');
@@ -1718,7 +1725,8 @@
       }
     }
     var text = document.createElement('div');
-    text.className = 'copy-text';
+    text.className = 'copy-text copy-text--play';
+    text.addEventListener('click', function () { openPlayer(it); });
     var title = document.createElement('div');
     title.className = 'copy-title';
     title.textContent = it.title;
@@ -1727,6 +1735,12 @@
     sub.textContent = (it.when ? dayTime(it.when) + ' · ' : '') + duration(it.seconds || 0) + (it.bytes ? ' · ' + mb(it.bytes) : '') + ' · ' + it.state;
     text.appendChild(title);
     text.appendChild(sub);
+    var play = document.createElement('button');
+    play.type = 'button';
+    play.className = 'copy-play';
+    play.setAttribute('aria-label', 'Ascolta ' + it.title);
+    play.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+    play.addEventListener('click', function () { openPlayer(it); });
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'copy-btn';
@@ -1734,6 +1748,7 @@
     btn.setAttribute('aria-label', 'Scarica la copia di ' + it.title);
     btn.addEventListener('click', function () { downloadCopy(it.local); });
     row.appendChild(text);
+    row.appendChild(play);
     row.appendChild(btn);
     return row;
   }
@@ -1803,6 +1818,7 @@
     $('copies-delete').disabled = true;
     var drop = new Set(ok);
     return Promise.all(ok.map(function (l) { return Store.dropChunks(l); })).then(function () {
+      if (P.local && drop.has(P.local)) closePlayer();
       S.archive = S.archive.filter(function (a) { return !drop.has(a.local); });
       S.copySel = new Set();
       return saveArchive();
@@ -1815,6 +1831,202 @@
   function closeCopies() {
     if (S.status) { renderReady(S.status); refreshStatus(); } // subito la schermata, poi lo stato aggiornato
     else { show('loading'); refreshStatus(true); }
+  }
+
+  // ─── Riproduttore delle registrazioni sul telefono ────────────────────────
+
+  // Schermate in cui il riproduttore resta aperto: mai mentre il microfono registra.
+  var PLAYER_SCREENS = { ready: 1, copies: 1, busy: 1 };
+  // local: registrazione nel riproduttore; url: file in memoria; token: cambia a ogni apertura o chiusura.
+  var P = { local: null, item: null, url: null, token: 0, failed: false, dragging: false };
+
+  /** File della copia sul telefono per l'ascolto: gli stessi byte di "Scarica" (null se la copia non c'è più). */
+  function copyBlob(local) {
+    var seg = S.segments.filter(function (s) { return s.local === local; })[0];
+    var entry = S.archive.filter(function (a) { return a.local === local; })[0];
+    if (seg && !isStream(seg)) return Store.list(seg.local).then(function (rows) { return rows.length ? legacyWav(rows) : null; });
+    var format = entry ? entry.format : seg && seg.format;
+    if (!format) return Promise.resolve(null);
+    return S.writing.then(function () { return Store.chunks(local, 0); }).then(function (list) {
+      return list.length ? new Blob(list.map(function (c) { return c.data; }), { type: MIME[format] || 'application/octet-stream' }) : null;
+    });
+  }
+
+  function playTime(seconds, long) {
+    var s = Math.max(0, Math.floor(seconds || 0));
+    if (long) return Math.floor(s / 3600) + ':' + pad(Math.floor((s % 3600) / 60)) + ':' + pad(s % 60);
+    return Math.floor(s / 60) + ':' + pad(s % 60);
+  }
+
+  /** Durata: quella del file appena il browser la conosce, prima quella salvata con la registrazione. */
+  function playerTotal() {
+    var d = $('player-audio').duration;
+    return isFinite(d) && d > 0 ? d : (P.item && P.item.seconds) || 0;
+  }
+
+  function renderPlayer() {
+    var audio = $('player-audio');
+    var seek = $('player-seek');
+    var total = playerTotal();
+    var long = total >= 3600;
+    var pos = P.dragging ? Number(seek.value) : Math.min(audio.currentTime || 0, total || Infinity);
+    seek.max = String(total > 0 ? total : 1);
+    if (!P.dragging) seek.value = String(pos);
+    seek.style.setProperty('--p', (total ? Math.min(100, (pos / total) * 100) : 0) + '%');
+    seek.setAttribute('aria-valuetext', playTime(pos, long) + ' di ' + playTime(total, long));
+    $('player-pos').textContent = playTime(pos, long);
+    $('player-dur').textContent = playTime(total, long);
+    var playing = Boolean(P.url) && !audio.paused && !audio.ended;
+    $('player-play').classList.toggle('playing', playing);
+    $('player-play').setAttribute('aria-label', playing ? 'Pausa' : 'Riproduci');
+    var off = !P.url || P.failed;
+    ['player-play', 'player-back', 'player-fwd', 'player-seek'].forEach(function (id) { $(id).disabled = off; });
+    fitPlayer();
+  }
+
+  function playerMsg(text) {
+    $('player-msg').hidden = !text;
+    $('player-msg').textContent = text || '';
+    fitPlayer();
+  }
+
+  /** In fondo alla pagina tanto spazio quanto è alto il riproduttore: nessun pulsante resta sotto. */
+  function fitPlayer() {
+    if ($('player').hidden) return;
+    var h = $('player').offsetHeight + 'px';
+    if (document.body.style.getPropertyValue('--player-h') !== h) document.body.style.setProperty('--player-h', h);
+  }
+
+  /** Nell'elenco si vede quale registrazione è nel riproduttore. */
+  function markPlaying() {
+    Array.prototype.forEach.call(document.querySelectorAll('.copy[data-local]'), function (row) {
+      row.classList.toggle('copy--playing', row.dataset.local === P.local);
+    });
+  }
+
+  /** Apre il riproduttore con la registrazione toccata (titolo, data, durata) e la fa partire dall'inizio. */
+  function openPlayer(it) {
+    if (S.recording || S.starting || !PLAYER_SCREENS[S.screen]) return Promise.resolve();
+    if (P.local === it.local && P.url && !P.failed) { // la stessa: continua da dove era
+      if ($('player-audio').paused) playNow();
+      return Promise.resolve();
+    }
+    closePlayer();
+    var token = P.token;
+    P.local = it.local;
+    P.item = it;
+    $('player-title').textContent = it.title;
+    $('player-sub').textContent = (it.when ? dayTime(it.when) + ' · ' : '') + duration(it.seconds || 0) + ' · ' + it.state;
+    $('player').hidden = false;
+    document.body.dataset.player = '1';
+    playerMsg('Apertura della registrazione…');
+    renderPlayer();
+    markPlaying();
+    return copyBlob(it.local).then(function (blob) {
+      if (token !== P.token) return; // chiuso, o scelta un'altra registrazione, nel frattempo
+      if (!blob) { P.failed = true; playerMsg('La copia sul telefono non c\'è più.'); renderPlayer(); return; }
+      P.url = URL.createObjectURL(blob);
+      $('player-audio').src = P.url;
+      playerMsg('');
+      mediaSession(it);
+      renderPlayer();
+      playNow();
+    }).catch(function () {
+      if (token !== P.token) return;
+      P.failed = true;
+      playerMsg('Non riesco a leggere la copia sul telefono.');
+      renderPlayer();
+    });
+  }
+
+  function playNow() {
+    var started = $('player-audio').play();
+    if (started && started.catch) {
+      started.catch(function (err) {
+        // Avvio automatico non concesso (per esempio iPhone): parte toccando ▶. Formato non riproducibile: evento "error".
+        if (P.url && err && err.name === 'NotAllowedError') { playerMsg('Tocca ▶ per ascoltare.'); renderPlayer(); }
+      });
+    }
+  }
+
+  function togglePlay() {
+    if (!P.url || P.failed) return;
+    var audio = $('player-audio');
+    if (audio.paused || audio.ended) { playerMsg(''); playNow(); } else audio.pause();
+  }
+
+  function seekTo(seconds) {
+    if (!P.url || P.failed) return;
+    var total = playerTotal();
+    $('player-audio').currentTime = Math.max(0, total ? Math.min(seconds, total) : seconds);
+    renderPlayer();
+  }
+
+  function skip(delta) { seekTo(($('player-audio').currentTime || 0) + delta); }
+
+  function onPlayerError() {
+    if (!P.url) return; // file tolto alla chiusura: non è un errore
+    P.failed = true;
+    playerMsg('Questo browser non riesce a riprodurre la registrazione: usa "Scarica" e aprila con un\'altra app.');
+    renderPlayer();
+  }
+
+  /** Chiude il riproduttore: audio fermo, file liberato dalla memoria (la copia sul telefono resta). */
+  function closePlayer() {
+    P.token += 1;
+    var url = P.url;
+    P.url = null;
+    P.local = null;
+    P.item = null;
+    P.failed = false;
+    P.dragging = false;
+    var audio = $('player-audio');
+    audio.pause();
+    if (audio.hasAttribute('src')) { audio.removeAttribute('src'); audio.load(); }
+    if (url) URL.revokeObjectURL(url);
+    $('player').hidden = true;
+    delete document.body.dataset.player;
+    playerMsg('');
+    mediaSession(null);
+    markPlaying();
+  }
+
+  /** Titolo e comandi anche nella notifica e nella schermata di blocco del telefono, come un lettore musicale. */
+  function mediaSession(it) {
+    var ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      ms.metadata = it && window.MediaMetadata ? new MediaMetadata({
+        title: it.title, artist: 'Lezioni UniPA', album: it.when ? dayTime(it.when) : '',
+        artwork: [{ src: new URL('../icona-180.png', location.href).href, sizes: '180x180', type: 'image/png' }],
+      }) : null;
+    } catch (e) { /* non disponibile */ }
+    var actions = {
+      play: function () { playNow(); },
+      pause: function () { $('player-audio').pause(); },
+      seekbackward: function () { skip(-15); },
+      seekforward: function () { skip(15); },
+      seekto: function (d) { if (d && isFinite(d.seekTime)) seekTo(d.seekTime); },
+    };
+    Object.keys(actions).forEach(function (name) {
+      try { ms.setActionHandler(name, it ? actions[name] : null); } catch (e) { /* azione non supportata */ }
+    });
+  }
+
+  function bindPlayer() {
+    var audio = $('player-audio');
+    ['timeupdate', 'durationchange', 'loadedmetadata', 'play', 'playing', 'pause', 'ended', 'seeked', 'emptied'].forEach(function (ev) {
+      audio.addEventListener(ev, renderPlayer);
+    });
+    audio.addEventListener('error', onPlayerError);
+    $('player-play').addEventListener('click', togglePlay);
+    $('player-back').addEventListener('click', function () { skip(-15); });
+    $('player-fwd').addEventListener('click', function () { skip(15); });
+    $('player-close').addEventListener('click', closePlayer);
+    var seek = $('player-seek');
+    seek.addEventListener('input', function () { P.dragging = true; renderPlayer(); });
+    seek.addEventListener('change', function () { P.dragging = false; seekTo(Number(seek.value)); });
+    window.addEventListener('resize', fitPlayer);
   }
 
   // ─── Schermo sempre acceso ────────────────────────────────────────────────
@@ -2111,6 +2323,7 @@
     $('copies-back').addEventListener('click', closeCopies);
     $('copies-all-check').addEventListener('change', toggleAllCopies);
     $('copies-delete').addEventListener('click', deleteSelectedCopies);
+    bindPlayer();
     $('stop-download').addEventListener('click', function () { if (S.stopping) downloadCopy(S.stopping.local); });
     $('done-back').addEventListener('click', function () { $('end-here-btn').disabled = false; $('end-here-btn').textContent = 'Termina qui'; show('loading'); refreshStatus(true); });
     $('change-name').addEventListener('click', function () { logout(''); });
