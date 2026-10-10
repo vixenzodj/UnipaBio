@@ -176,6 +176,13 @@
     .text { flex: 1; min-width: 0; }
     .title { display: block; font-weight: 700; font-size: 1.05rem; letter-spacing: -.01em; }
     .subtitle { display: block; margin-top: 2px; font-size: .86rem; color: var(--muted); }
+    /* A chi è riservato il notebook (canale del corso) */
+    .tag {
+      display: inline-block; margin: 4px 0 1px; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+      font-size: .7rem; font-weight: 700; letter-spacing: 0; color: #4338ca;
+      background: rgba(79, 70, 229, .1); border: 1px solid rgba(79, 70, 229, .28);
+    }
+    @media (prefers-color-scheme: dark) { .tag { color: #c7d2fe; background: rgba(165, 180, 252, .14); border-color: rgba(165, 180, 252, .32); } }
     .chevron { flex: none; width: 22px; height: 22px; color: var(--muted); transition: transform .18s ease; }
     .card:hover .chevron { transform: translateX(3px); }
 
@@ -292,6 +299,7 @@
           </span>
           <span class="text">
             <span class="title">Matematica Generale</span>
+            <span class="tag">Solo matricole pari</span>
             <span class="subtitle">Notebook NotebookLM</span>
           </span>
           <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
@@ -307,6 +315,7 @@
           </span>
           <span class="text">
             <span class="title">Microeconomia</span>
+            <span class="tag">Solo matricole pari</span>
             <span class="subtitle">Notebook NotebookLM</span>
           </span>
           <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
@@ -322,6 +331,7 @@
           </span>
           <span class="text">
             <span class="title">Storia Economica</span>
+            <span class="tag">Solo cognomi O-Z</span>
             <span class="subtitle">Notebook NotebookLM</span>
           </span>
           <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
