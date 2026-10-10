@@ -3,8 +3,10 @@
 Pagina del gruppo con i link ai materiali delle lezioni:
 
 - **Cartella delle lezioni (Google Drive):** registrazioni per materia, dispense, riassunti e libri.
-- **Orario delle lezioni:** il pulsante apre il Google Calendar delle lezioni incorporato (in italiano, ora di Roma;
-  elenco giorno per giorno sul telefono, settimana sul computer). Vale per matricole pari e Storia O-Z.
+- **Orario delle lezioni:** il pulsante apre l'orario delle lezioni, letto dal calendario tramite Unipa-bot
+  (`?a=orario` dell'ingresso del registratore, sola lettura, solo gli eventi "<Materia>_lezN") e scritto dalla pagina
+  sempre in italiano e a 24 ore con l'ora di Roma, qualunque siano le impostazioni di chi guarda. L'ultimo orario
+  resta sul telefono per quando manca la rete. Vale per matricole pari e Storia O-Z.
 - **Notebook NotebookLM:** Matematica Generale, Microeconomia (matricole pari), Storia Economica (cognomi O-Z).
 
 Pagina pubblicata: <https://vixenzodj.github.io/UnipaBio/>

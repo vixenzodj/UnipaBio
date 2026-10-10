@@ -202,7 +202,7 @@
     .sheet[open] { display: flex; }
     .sheet::backdrop { background: rgba(8, 12, 28, .62); }
     @media (min-width: 720px) {
-      .sheet { width: min(980px, calc(100% - 48px)); height: min(820px, calc(100% - 48px)); margin: auto; border-radius: 24px; box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
+      .sheet { width: min(640px, calc(100% - 48px)); height: min(860px, calc(100% - 48px)); margin: auto; border-radius: 24px; box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
     }
     .sheet-head { display: flex; align-items: center; gap: 12px; padding: max(14px, env(safe-area-inset-top)) 16px 12px; border-bottom: 1px solid var(--border); }
     .sheet-head .icon { width: 42px; height: 42px; border-radius: 13px; }
@@ -216,10 +216,36 @@
     }
     .sheet-close svg { width: 20px; height: 20px; }
     .sheet-close:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-    .sheet-body { position: relative; flex: 1; min-height: 0; background: #fff; padding-bottom: env(safe-area-inset-bottom); }
-    .sheet-body iframe { display: block; width: 100%; height: 100%; border: 0; }
-    .sheet-wait { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; font-size: .9rem; color: #55617a; }
-    .sheet-wait[hidden] { display: none; }
+    .sheet-body {
+      flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+      padding: 0 16px max(20px, env(safe-area-inset-bottom));
+    }
+    .sheet-state { margin: 48px 12px; text-align: center; color: var(--muted); font-size: .95rem; }
+    .sheet-state a, .sheet-state button { display: inline-block; margin: 14px 6px 0; }
+    .sheet-retry { min-height: 42px; padding: 0 18px; border: 0; border-radius: 999px; font: inherit; font-weight: 700; color: #fff; background: var(--drive); cursor: pointer; }
+    /* Orario: settimane, giorni, lezioni (orari a 24 ore scritti dalla pagina, non dal calendario di Google) */
+    .tt-week {
+      position: sticky; top: 0; z-index: 1; margin: 0 -16px; padding: 14px 16px 8px; background: var(--surface-strong);
+      font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+    }
+    .tt-day { margin: 6px 0 16px; }
+    .tt-date { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-weight: 800; font-size: 1rem; letter-spacing: -.01em; }
+    .tt-badge { padding: 2px 9px; border-radius: 999px; font-size: .7rem; font-weight: 800; color: #fff; background: #4f46e5; }
+    .tt-badge--soft { color: var(--muted); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
+    .tt-lesson { display: flex; align-items: stretch; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); }
+    .tt-lesson + .tt-lesson { margin-top: 8px; }
+    .tt-lesson--past { opacity: .55; }
+    .tt-lesson--now { border-color: rgba(16, 185, 129, .55); box-shadow: 0 0 0 3px rgba(16, 185, 129, .15); }
+    .tt-bar { flex: none; width: 5px; border-radius: 4px; background: var(--c, #6366f1); }
+    .tt-time { flex: none; width: 50px; font-weight: 800; font-size: .98rem; line-height: 1.3; font-variant-numeric: tabular-nums; }
+    .tt-time small { display: block; font-size: .82rem; font-weight: 600; color: var(--muted); }
+    .tt-info { flex: 1; min-width: 0; }
+    .tt-subject { display: block; font-weight: 700; font-size: .98rem; line-height: 1.3; }
+    .tt-meta { display: block; margin-top: 2px; font-size: .8rem; color: var(--muted); }
+    .tt-now { align-self: center; flex: none; padding: 3px 8px; border-radius: 999px; font-size: .68rem; font-weight: 800; color: #047857; background: rgba(16, 185, 129, .16); }
+    @media (prefers-color-scheme: dark) { .tt-now { color: #6ee7b7; } }
+    .tt-gap { margin: 4px 0 16px; padding: 10px 12px; border-radius: 12px; border: 1px dashed var(--border); text-align: center; font-size: .82rem; color: var(--muted); }
+    .tt-foot { margin: 18px 4px 0; text-align: center; font-size: .75rem; color: var(--muted); }
     html.sheet-open, html.sheet-open body { overflow: hidden; }
 
     /* Scheda in evidenza (Drive) */
@@ -441,31 +467,177 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
       </button>
     </div>
-    <div class="sheet-body">
-      <p class="sheet-wait" id="orario-attesa">Caricamento dell'orario…</p>
-      <iframe id="orario-frame" title="Orario delle lezioni (Google Calendar)"></iframe>
+    <div class="sheet-body" id="orario-lista">
+      <p class="sheet-state">Caricamento dell'orario…</p>
     </div>
   </dialog>
 
   <script>
-    // Orario delle lezioni: Google Calendar incorporato in italiano, ora di Roma, settimana da lunedì.
-    // Sul telefono l'elenco giorno per giorno (più leggibile), sul computer la settimana.
+    // Orario delle lezioni: le lezioni arrivano dal calendario tramite Unipa-bot (sola lettura) e la pagina le
+    // scrive da sé, sempre in italiano e a 24 ore con l'ora di Roma, qualunque siano le impostazioni di chi guarda.
+    // L'ultimo orario ricevuto resta sul telefono: si vede subito anche con la rete lenta.
     (function () {
+      var ENDPOINT = 'https:\/\/script.google.com/macros/s/AKfycbwOD_JmvrcildRkTfVQ6FKFkxIieSZOLPqISfoeN7pkRKOgSQZ53n1NiOjm8snDlu4mVQ/exec';
+      var GOOGLE = 'https:\/\/calendar.google.com/calendar/embed?src=vixcenzodj.94%40gmail.com&ctz=Europe%2FRome&hl=it';
+      var SAVED = 'orario-lezioni-v1';
+      var TZ = 'Europe/Rome';
+      var DAY = 86400000;
+      var COLORS = [[/matematica/i, '#2563eb'], [/micro/i, '#059669'], [/storia/i, '#d97706']];
       var dialog = document.getElementById('orario');
       var openBtn = document.getElementById('orario-apri');
-      var frame = document.getElementById('orario-frame');
-      var waiting = document.getElementById('orario-attesa');
-      var base = 'https:\/\/calendar.google.com/calendar/embed?src=vixcenzodj.94%40gmail.com&ctz=Europe%2FRome&hl=it&wkst=2' +
-        '&showTitle=0&showPrint=0&showCalendars=0&showTz=0&color=%233F51B5';
-      function src() { return base + '&mode=' + (window.innerWidth >= 720 ? 'WEEK' : 'AGENDA'); }
+      var list = document.getElementById('orario-lista');
+      var loading = false;
+      var loadedAt = 0;
+
+      var partsTime = new Intl.DateTimeFormat('it-IT', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: TZ });
+      var partsDate = new Intl.DateTimeFormat('en-GB', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: TZ });
+      var longDay = new Intl.DateTimeFormat('it-IT', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TZ });
+      var shortDay = new Intl.DateTimeFormat('it-IT', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+      /** "dal 12 al 16 ottobre", oppure "dal 30 novembre al 4 dicembre" (date in UTC a mezzanotte). */
+      function span(a, b) {
+        var same = new Date(a).getUTCMonth() === new Date(b).getUTCMonth();
+        return 'dal ' + (same ? new Date(a).getUTCDate() : shortDay.format(new Date(a))) + ' al ' + shortDay.format(new Date(b));
+      }
+      function part(parts, type) { for (var i = 0; i < parts.length; i += 1) if (parts[i].type === type) return parts[i].value; return ''; }
+      function pad(n) { return (n < 10 ? '0' : '') + n; }
+      /** "10:00", sempre a 24 ore (anche se il telefono è impostato a 12 ore). */
+      function hm(ms) {
+        var p = partsTime.formatToParts(new Date(ms));
+        var h = parseInt(part(p, 'hour'), 10) % 24;
+        var period = part(p, 'dayPeriod');
+        if (period) h = (h % 12) + (/p/i.test(period) ? 12 : 0);
+        return pad(h) + ':' + part(p, 'minute');
+      }
+      /** Giorno a Roma come "2026-10-12" (confrontabile come testo). */
+      function ymd(ms) {
+        var p = partsDate.formatToParts(new Date(ms));
+        return part(p, 'year') + '-' + part(p, 'month') + '-' + part(p, 'day');
+      }
+      function utcOf(day) { return Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10)); }
+      function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+      function node(tag, cls, text) { var el = document.createElement(tag); if (cls) el.className = cls; if (text != null) el.textContent = text; return el; }
+      function colorOf(subject) { for (var i = 0; i < COLORS.length; i += 1) if (COLORS[i][0].test(subject)) return COLORS[i][1]; return '#6366f1'; }
+
+      function state(text, withActions) {
+        list.textContent = '';
+        var box = node('div', 'sheet-state');
+        box.appendChild(node('p', null, text));
+        if (withActions) {
+          var retry = node('button', 'sheet-retry', 'Riprova');
+          retry.type = 'button';
+          retry.addEventListener('click', function () { load(true); });
+          box.appendChild(retry);
+          var link = node('a', null, 'Apri in Google Calendar');
+          link.href = GOOGLE;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          box.appendChild(link);
+        }
+        list.appendChild(box);
+      }
+
+      function render(data, note) {
+        var now = Date.now();
+        var today = ymd(now);
+        var tomorrow = ymd(now + DAY);
+        var lessons = (data.lessons || []).filter(function (l) { return ymd(l.s) >= today; }).sort(function (a, b) { return a.s - b.s; });
+        if (!lessons.length) { state('Nessuna lezione in calendario nei prossimi giorni.'); return; }
+        var top = list.scrollTop;
+        list.textContent = '';
+        var lastDay = null;
+        var lastWeek = null;
+        var lastUtc = null;
+        var box = null;
+        lessons.forEach(function (l) {
+          var day = ymd(l.s);
+          if (day !== lastDay) {
+            var utc = utcOf(day);
+            if (lastUtc !== null && utc - lastUtc > 3 * DAY) {
+              list.appendChild(node('p', 'tt-gap', 'Nessuna lezione ' + span(lastUtc + DAY, utc - DAY)));
+            }
+            var monday = utc - ((new Date(utc).getUTCDay() + 6) % 7) * DAY;
+            if (monday !== lastWeek) {
+              list.appendChild(node('div', 'tt-week', 'Settimana ' + span(monday, monday + 4 * DAY)));
+              lastWeek = monday;
+            }
+            box = node('section', 'tt-day');
+            var head = node('div', 'tt-date', cap(longDay.format(new Date(l.s))));
+            if (day === today) head.appendChild(node('span', 'tt-badge', 'Oggi'));
+            else if (day === tomorrow) head.appendChild(node('span', 'tt-badge tt-badge--soft', 'Domani'));
+            box.appendChild(head);
+            list.appendChild(box);
+            lastDay = day;
+            lastUtc = utc;
+          }
+          var running = l.s <= now && now < l.e;
+          var row = node('div', 'tt-lesson' + (running ? ' tt-lesson--now' : l.e <= now ? ' tt-lesson--past' : ''));
+          row.style.setProperty('--c', colorOf(l.m));
+          row.appendChild(node('span', 'tt-bar'));
+          var time = node('span', 'tt-time', hm(l.s));
+          time.appendChild(node('small', null, hm(l.e)));
+          row.appendChild(time);
+          var info = node('span', 'tt-info');
+          info.appendChild(node('span', 'tt-subject', l.m));
+          info.appendChild(node('span', 'tt-meta', ['Lezione ' + l.n, l.l, l.p ? 'Prof. ' + l.p : ''].filter(Boolean).join(' · ')));
+          row.appendChild(info);
+          if (running) row.appendChild(node('span', 'tt-now', 'In corso'));
+          box.appendChild(row);
+        });
+        list.appendChild(node('p', 'tt-foot', 'Ora italiana · aggiornato alle ' + hm(data.updated || now) + (note || '')));
+        list.scrollTop = top;
+      }
+
+      function saved() {
+        try { var d = JSON.parse(localStorage.getItem(SAVED) || 'null'); return d && Array.isArray(d.lessons) ? d : null; } catch (e) { return null; }
+      }
+
+      function fetchOnce() {
+        var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+        var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 25000);
+        return fetch(ENDPOINT + '?a=orario', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            clearTimeout(timer);
+            if (!data || data.a !== 'orario' || !data.ok || !Array.isArray(data.lessons)) throw new Error('risposta non valida');
+            return data;
+          }, function (err) { clearTimeout(timer); throw err; });
+      }
+
+      /** Google a volte risponde con una pagina HTML invece dei dati: altri due tentativi prima di arrendersi. */
+      function attempt(n) {
+        return fetchOnce().catch(function (err) {
+          if (n >= 3) throw err;
+          return new Promise(function (ok) { setTimeout(ok, n * 1500); }).then(function () { return attempt(n + 1); });
+        });
+      }
+
+      function load(force) {
+        if (loading || (!force && Date.now() - loadedAt < 60000)) return;
+        loading = true;
+        if (force) state('Caricamento dell\'orario…');
+        attempt(1)
+          .then(function (data) {
+            loadedAt = Date.now();
+            try { localStorage.setItem(SAVED, JSON.stringify(data)); } catch (e) { /* memoria non disponibile */ }
+            render(data, '');
+          })
+          .catch(function () {
+            var old = saved();
+            if (old) render(old, ' · senza connessione: ultimo orario salvato');
+            else state('Non riesco a caricare l\'orario in questo momento.', true);
+          })
+          .then(function () { loading = false; });
+      }
+
       if (typeof dialog.showModal !== 'function') { // browser senza finestre di dialogo: il calendario in una nuova scheda
-        openBtn.addEventListener('click', function () { window.open(src(), '_blank', 'noopener'); });
+        openBtn.addEventListener('click', function () { window.open(GOOGLE, '_blank', 'noopener'); });
         return;
       }
-      frame.addEventListener('load', function () { waiting.hidden = true; });
       function close() { if (dialog.open) dialog.close(); }
       openBtn.addEventListener('click', function () {
-        if (!frame.getAttribute('src')) frame.src = src();
+        var old = saved();
+        if (old && !list.querySelector('.tt-day')) render(old, ' · aggiornamento in corso…');
+        load(false);
         dialog.showModal();
         document.documentElement.classList.add('sheet-open');
         // "Indietro" del telefono chiude l'orario invece di uscire dalla pagina.
