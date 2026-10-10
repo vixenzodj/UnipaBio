@@ -636,7 +636,10 @@
       function close() { if (dialog.open) dialog.close(); }
       openBtn.addEventListener('click', function () {
         var old = saved();
-        if (old && !list.querySelector('.tt-day')) render(old, ' · aggiornamento in corso…');
+        if (!list.querySelector('.tt-day')) {
+          if (old) render(old, ' · aggiornamento in corso…');
+          else state('Caricamento dell\'orario…');
+        }
         load(false);
         dialog.showModal();
         document.documentElement.classList.add('sheet-open');
@@ -650,6 +653,8 @@
         document.documentElement.classList.remove('sheet-open');
         if (history.state && history.state.orario) history.back(); // chiuso con ✕ o Esc: via il passo aggiunto
       });
+      // Il cloud risponde in qualche secondo: l'orario si chiede già all'apertura della pagina, così al tocco è pronto.
+      setTimeout(function () { load(false); }, 600);
     })();
 
   </script>
