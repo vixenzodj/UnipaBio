@@ -46,6 +46,7 @@
       --mate: linear-gradient(135deg, #2563eb, #38bdf8);
       --micro: linear-gradient(135deg, #059669, #34d399);
       --storia: linear-gradient(135deg, #d97706, #fbbf24);
+      --orario: linear-gradient(135deg, #db2777, #f472b6);
       --radius: 20px;
     }
     @media (prefers-color-scheme: dark) {
@@ -190,6 +191,36 @@
     .icon--mate { background: var(--mate); }
     .icon--micro { background: var(--micro); }
     .icon--storia { background: var(--storia); }
+    .icon--orario { background: var(--orario); }
+    .card--button { width: 100%; font: inherit; text-align: left; cursor: pointer; }
+
+    /* Orario: Google Calendar a tutto schermo sul telefono, in una finestra grande sul computer */
+    .sheet {
+      inset: 0; width: 100%; max-width: 100%; height: 100%; max-height: 100%; margin: 0; padding: 0; border: 0;
+      background: var(--surface-strong); color: var(--text); display: none; flex-direction: column; overflow: hidden;
+    }
+    .sheet[open] { display: flex; }
+    .sheet::backdrop { background: rgba(8, 12, 28, .62); }
+    @media (min-width: 720px) {
+      .sheet { width: min(980px, calc(100% - 48px)); height: min(820px, calc(100% - 48px)); margin: auto; border-radius: 24px; box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
+    }
+    .sheet-head { display: flex; align-items: center; gap: 12px; padding: max(14px, env(safe-area-inset-top)) 16px 12px; border-bottom: 1px solid var(--border); }
+    .sheet-head .icon { width: 42px; height: 42px; border-radius: 13px; }
+    .sheet-head .icon svg { width: 22px; height: 22px; }
+    .sheet-text { flex: 1; min-width: 0; }
+    .sheet-title { font-weight: 800; font-size: 1.08rem; letter-spacing: -.01em; }
+    .sheet-sub { margin: 1px 0 0; font-size: .8rem; color: var(--muted); }
+    .sheet-close {
+      flex: none; width: 40px; height: 40px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center; cursor: pointer;
+      background: var(--surface); color: var(--text); box-shadow: inset 0 0 0 1px var(--border);
+    }
+    .sheet-close svg { width: 20px; height: 20px; }
+    .sheet-close:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .sheet-body { position: relative; flex: 1; min-height: 0; background: #fff; padding-bottom: env(safe-area-inset-bottom); }
+    .sheet-body iframe { display: block; width: 100%; height: 100%; border: 0; }
+    .sheet-wait { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; font-size: .9rem; color: #55617a; }
+    .sheet-wait[hidden] { display: none; }
+    html.sheet-open, html.sheet-open body { overflow: hidden; }
 
     /* Scheda in evidenza (Drive) */
     .card--featured {
@@ -286,6 +317,28 @@
       </div>
     </section>
 
+    <!-- ═══ Orario delle lezioni: Google Calendar incorporato, si apre con un tocco ═══ -->
+    <section aria-labelledby="sezione-orario">
+      <h2 id="sezione-orario">Orario delle lezioni</h2>
+      <div class="list">
+        <button class="card card--button" type="button" id="orario-apri" aria-haspopup="dialog" aria-controls="orario">
+          <span class="icon icon--orario" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect>
+              <path d="M3.5 10h17M8 3v4M16 3v4"></path>
+              <path d="M8 14h2M14 14h2M8 17.5h2"></path>
+            </svg>
+          </span>
+          <span class="text">
+            <span class="title">Orario delle lezioni</span>
+            <span class="tag">Solo matricole pari · Storia O-Z</span>
+            <span class="subtitle">1° semestre · sempre aggiornato</span>
+          </span>
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
+        </button>
+      </div>
+    </section>
+
     <!-- ═══ Notebook NotebookLM: per aggiungere una materia, copia una scheda e cambia link, nome e colore ═══ -->
     <section aria-labelledby="sezione-notebook">
       <h2 id="sezione-notebook">Notebook delle materie</h2>
@@ -371,6 +424,63 @@
     </footer>
   </main>
 
+  <!-- Orario delle lezioni (si apre da "Orario delle lezioni"; il calendario si carica solo al primo tocco) -->
+  <dialog class="sheet" id="orario" aria-labelledby="orario-titolo">
+    <div class="sheet-head">
+      <span class="icon icon--orario" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect>
+          <path d="M3.5 10h17M8 3v4M16 3v4"></path>
+        </svg>
+      </span>
+      <div class="sheet-text">
+        <div class="sheet-title" id="orario-titolo">Orario delle lezioni</div>
+        <p class="sheet-sub">1° semestre 2026/27 · matricole pari · Storia economica O-Z</p>
+      </div>
+      <button class="sheet-close" type="button" id="orario-chiudi" aria-label="Chiudi l'orario">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <p class="sheet-wait" id="orario-attesa">Caricamento dell'orario…</p>
+      <iframe id="orario-frame" title="Orario delle lezioni (Google Calendar)"></iframe>
+    </div>
+  </dialog>
+
+  <script>
+    // Orario delle lezioni: Google Calendar incorporato in italiano, ora di Roma, settimana da lunedì.
+    // Sul telefono l'elenco giorno per giorno (più leggibile), sul computer la settimana.
+    (function () {
+      var dialog = document.getElementById('orario');
+      var openBtn = document.getElementById('orario-apri');
+      var frame = document.getElementById('orario-frame');
+      var waiting = document.getElementById('orario-attesa');
+      var base = 'https:\/\/calendar.google.com/calendar/embed?src=vixcenzodj.94%40gmail.com&ctz=Europe%2FRome&hl=it&wkst=2' +
+        '&showTitle=0&showPrint=0&showCalendars=0&showTz=0&color=%233F51B5';
+      function src() { return base + '&mode=' + (window.innerWidth >= 720 ? 'WEEK' : 'AGENDA'); }
+      if (typeof dialog.showModal !== 'function') { // browser senza finestre di dialogo: il calendario in una nuova scheda
+        openBtn.addEventListener('click', function () { window.open(src(), '_blank', 'noopener'); });
+        return;
+      }
+      frame.addEventListener('load', function () { waiting.hidden = true; });
+      function close() { if (dialog.open) dialog.close(); }
+      openBtn.addEventListener('click', function () {
+        if (!frame.getAttribute('src')) frame.src = src();
+        dialog.showModal();
+        document.documentElement.classList.add('sheet-open');
+        // "Indietro" del telefono chiude l'orario invece di uscire dalla pagina.
+        try { history.pushState({ orario: true }, ''); } catch (e) { /* non disponibile */ }
+      });
+      document.getElementById('orario-chiudi').addEventListener('click', close);
+      window.addEventListener('popstate', close);
+      dialog.addEventListener('click', function (e) { if (e.target === dialog) close(); }); // tocco fuori (computer)
+      dialog.addEventListener('close', function () {
+        document.documentElement.classList.remove('sheet-open');
+        if (history.state && history.state.orario) history.back(); // chiuso con ✕ o Esc: via il passo aggiunto
+      });
+    })();
+
+  </script>
   <script>
     // Condivisione: menu del telefono (WhatsApp, Telegram, ...) oppure copia del link.
     (function () {

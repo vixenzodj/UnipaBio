@@ -3,7 +3,9 @@
 Pagina del gruppo con i link ai materiali delle lezioni:
 
 - **Cartella delle lezioni (Google Drive):** registrazioni per materia, dispense, riassunti e libri.
-- **Notebook NotebookLM:** Matematica Generale, Microeconomia, Storia Economica.
+- **Orario delle lezioni:** il pulsante apre il Google Calendar delle lezioni incorporato (in italiano, ora di Roma;
+  elenco giorno per giorno sul telefono, settimana sul computer). Vale per matricole pari e Storia O-Z.
+- **Notebook NotebookLM:** Matematica Generale, Microeconomia (matricole pari), Storia Economica (cognomi O-Z).
 
 Pagina pubblicata: <https://vixenzodj.github.io/UnipaBio/>
 
